@@ -35,7 +35,7 @@ TRADING_MODE = os.environ.get("TRADING_MODE", "paper").lower()
 SHORT_WINDOW = 20
 LONG_WINDOW = 50
 PORTFOLIO_RISK_PERCENTAGE = 0.15
-RISK_PER_TRADE_PCT = 0.95
+RISK_PER_TRADE_PCT = 0.95 
 
 # --- Globals ---
 PRODUCT_DETAILS_CACHE = {}
@@ -79,7 +79,7 @@ def coinbase_request(method, path, body=None):
 def get_product_details(product_id):
     if product_id in PRODUCT_DETAILS_CACHE:
         return PRODUCT_DETAILS_CACHE[product_id]
-
+    
     path = f"/api/v3/brokerage/products/{product_id}"
     data = coinbase_request("GET", path)
     if data:
@@ -123,7 +123,7 @@ def place_market_order(product_id, side, amount_quote_currency=None, amount_base
         logging.info("[PAPER TRADE] would have placed order.")
         return {"success": True, "order_id": "MOCK_ORDER_ID"}
 
-# --- Account & Trading Logic (Simplified) ---
+# --- Account & Trading Logic ---
 def get_all_balances():
     all_accounts = []
     path = "/api/v3/brokerage/accounts"
@@ -150,7 +150,7 @@ def get_all_balances():
 def get_current_price(product_id):
     data = get_product_details(product_id)
     return float(data['price']) if data else None
-
+    
 def get_market_data(product_id):
     path = f"/api/v3/brokerage/products/{product_id}/candles?limit={LONG_WINDOW + 10}&granularity=ONE_HOUR"
     data = coinbase_request("GET", path)
@@ -165,20 +165,11 @@ def run_bot():
     logging.info(f"--- 🤖 Starting Crypto Bot Run (Mode: {TRADING_MODE.upper()}) ---")
     balances = get_all_balances()
     cash = balances["cash"]
-
-    # --- Convert any remaining USD to USDC before trading ---
+    held = balances["crypto"]
+    
     usd_balance = cash.get("USD", 0.0)
     if usd_balance > 1.0:
-        logging.info(f"Detected USD balance of ${usd_balance:.2f}. Converting to USDC.")
-        # To convert USD to USDC, we BUY the USDC-USD pair with our USD funds.
-        place_market_order("USDC-USD", 'BUY', amount_quote_currency=usd_balance)
-        logging.info("Pausing for 5 seconds to allow the USD-USDC order to likely fill.")
-        time.sleep(5)
-        # Re-fetch balances after conversion to get the updated USDC amount
-        balances = get_all_balances()
-        cash = balances["cash"]
-
-    held = balances["crypto"]
+        logging.warning(f"Detected USD balance of ${usd_balance:.2f}. Please convert to USDC in the UI manually.")
 
     total_value = sum(cash.values())
     for currency, amount in held.items():
@@ -191,21 +182,17 @@ def run_bot():
     assets = list(held.keys()) + ["BTC", "ETH", "SOL"]
     for asset in set(assets):
         if asset in ["USD", "USDC"]: continue
-
+        
         product_id = f"{asset}-USDC"
         price = get_current_price(product_id)
-        if not price:
-            logging.warning(f"Could not fetch price for {product_id}, skipping.")
-            continue
+        if not price: continue
 
         df = get_market_data(product_id)
-        if df is None or len(df) < LONG_WINDOW:
-            logging.warning(f"Not enough market data for {product_id}, skipping.")
-            continue
-
+        if df is None or len(df) < LONG_WINDOW: continue
+        
         df[f'MA_{SHORT_WINDOW}'] = df['close'].rolling(window=SHORT_WINDOW).mean()
         df[f'MA_{LONG_WINDOW}'] = df['close'].rolling(window=LONG_WINDOW).mean()
-
+        
         last = df.iloc[-1]
         ma_short, ma_long = last.get(f'MA_{SHORT_WINDOW}'), last.get(f'MA_{LONG_WINDOW}')
         if ma_short is None or ma_long is None: continue
@@ -217,7 +204,7 @@ def run_bot():
             if buy_size > 10: # Min order check
                 logging.info(f"SIGNAL BUY: ${buy_size:,.2f} of {asset} using USDC")
                 place_market_order(product_id, 'BUY', amount_quote_currency=buy_size)
-
+        
         elif ma_short < ma_long:
             held_amount = held.get(asset, 0.0)
             if held_amount * price > 10: # Min order check
