@@ -125,15 +125,26 @@ def place_market_order(product_id, side, amount_quote_currency=None, amount_base
 
 # --- Account & Trading Logic (Simplified) ---
 def get_all_balances():
+    all_accounts = []
     path = "/api/v3/brokerage/accounts"
-    data = coinbase_request("GET", path)
+    while True:
+        data = coinbase_request("GET", path)
+        if data and 'accounts' in data:
+            all_accounts.extend(data['accounts'])
+            if data.get('has_next'):
+                cursor = data.get('cursor')
+                path = f"/api/v3/brokerage/accounts?cursor={cursor}"
+            else:
+                break
+        else:
+            break
+
     balances = {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}}
-    if data and 'accounts' in data:
-        for acc in data['accounts']:
-            balance = float(acc['available_balance']['value'])
-            currency = acc['currency']
-            if currency in balances['cash']: balances['cash'][currency] = balance
-            elif balance > 0: balances['crypto'][currency] = balance
+    for acc in all_accounts:
+        balance = float(acc['available_balance']['value'])
+        currency = acc['currency']
+        if currency in balances['cash']: balances['cash'][currency] = balance
+        elif balance > 0: balances['crypto'][currency] = balance
     return balances
 
 def get_current_price(product_id):
