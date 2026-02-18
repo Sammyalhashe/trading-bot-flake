@@ -1,0 +1,32 @@
+{
+    "SUI-USD": {
+        "entry_price": 0.9697,
+        "highest_price": 0.9842,
+        "stop_loss_price": 0.9349899999999999
+    },
+    "POL-USD": {
+        "entry_price": 0.11,
+        "highest_price": 0.1101,
+        "stop_loss_price": 0.104595
+    },
+    "AVAX-USD": {
+        "entry_price": 9.09348,
+        "highest_price": 9.18,
+        "stop_loss_price": 8.721
+    },
+    "ETH-USD": {
+        "entry_price": 1995.94,
+        "highest_price": 1995.94,
+        "stop_loss_price": 1896.143
+    },
+    "BTC-USD": {
+        "entry_price": 70535.01,
+        "highest_price": 70535.01,
+        "stop_loss_price": 67008.25949999999
+    },
+    "DOT-USD": {
+        "entry_price": 1.343,
+        "highest_price": 1.364,
+        "stop_loss_price": 1.2958
+    }
+}
