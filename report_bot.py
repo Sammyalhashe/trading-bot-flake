@@ -95,7 +95,9 @@ def generate_report(signals):
     cash = balances["cash"]
     held = balances["crypto"]
     
-    total_usdc_value = cash["USD"] + cash["USDC"]
+    # Known manual offset for Coinbase Stocks (not in API)
+    stock_value = 2500.0
+    total_usdc_value = cash["USD"] + cash["USDC"] + stock_value
     crypto_details = []
     
     for cur, amt in held.items():
@@ -105,7 +107,7 @@ def generate_report(signals):
             total_usdc_value += val
             crypto_details.append(f"{cur}: {amt:.4f} (${val:,.2f})")
     
-    report.append(f"TOTAL PORTFOLIO VALUE: {total_usdc_value:,.2f} USDC")
+    report.append(f"TOTAL PORTFOLIO VALUE: {total_usdc_value:,.2f} USDC (includes ~$2,500 in Stocks)")
     report.append(f"  - Cash: ${(cash["USD"] + cash["USDC"]):,.2f} (USD: ${cash["USD"]:,.2f}, USDC: ${cash["USDC"]:,.2f})")
     if crypto_details:
         report.append(f"  - Crypto: " + ", ".join(crypto_details))
