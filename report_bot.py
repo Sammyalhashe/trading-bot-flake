@@ -60,6 +60,7 @@ def parse_logs_for_signals():
     return signals
 
 
+
 def get_all_balances():
     all_accounts = []
     path = "/api/v3/brokerage/accounts"
@@ -69,38 +70,64 @@ def get_all_balances():
         all_accounts.extend(data["accounts"])
         if not data.get("has_next"): break
         path = f"/api/v3/brokerage/accounts?cursor={data["cursor"]}"
-    balances = {"USD": 0.0, "USDC": 0.0}
+    
+    balances = {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}}
     for acc in all_accounts:
         cur, val = acc["currency"], float(acc["available_balance"]["value"])
-        if cur in balances: balances[cur] = val
+        if cur in balances["cash"]: balances["cash"][cur] = val
+        elif val > 0: balances["crypto"][cur] = val
     return balances
+
 
 def generate_report(signals):
     report = ["--- 🤖 Trading Bot Report ---"]
     status = "Unknown"
     if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r') as f:
-            for line in reversed(f.readlines()[-100:]):
+        with open(LOG_FILE, "r") as f:
+            lines_log = f.readlines()
+            for line in reversed(lines_log[-100:]):
                 if ("Market Regime:" in line or "Market:" in line) and "Portfolio" not in line:
-                    status = line.split(":")[-1].strip(); break
+                    status = line.split(":")[-1].strip()
+                    break
     report.append(f"Market Status: {status}\n")
-    balances = get_all_balances()
-    total_cash = balances["USD"] + balances["USDC"]
-    report.append(f"Portfolio Cash: ${total_cash:,.2f} (USD: ${balances["USD"]:,.2f}, USDC: ${balances["USDC"]:,.2f})\n")
     
-    if not signals: report.append("No new trading signals in the last run.")
+    balances = get_all_balances()
+    cash = balances["cash"]
+    held = balances["crypto"]
+    
+    total_usdc_value = cash["USD"] + cash["USDC"]
+    crypto_details = []
+    
+    for cur, amt in held.items():
+        price_data = get_current_price(f"{cur}-USDC")
+        if price_data:
+            val = amt * price_data
+            total_usdc_value += val
+            crypto_details.append(f"{cur}: {amt:.4f} (${val:,.2f})")
+    
+    report.append(f"TOTAL PORTFOLIO VALUE: {total_usdc_value:,.2f} USDC")
+    report.append(f"  - Cash: ${(cash["USD"] + cash["USDC"]):,.2f} (USD: ${cash["USD"]:,.2f}, USDC: ${cash["USDC"]:,.2f})")
+    if crypto_details:
+        report.append(f"  - Crypto: " + ", ".join(crypto_details))
+    report.append("")
+    
+    if not signals:
+        report.append("No new trading signals in the last run.")
     else:
         total = 0.0
         for s in signals:
-            cur = get_current_price(f"{s['asset']}-USDC")
+            cur = get_current_price(f"{s["asset"]}-USDC")
             if cur:
-                pct = ((cur - s['price']) / s['price']) * 100
-                qty = s['amount'] / s['price']
-                dpl = (cur - s['price']) * qty
-                if s['type'] == "SELL": pct, dpl = -pct, -dpl
+                pct = ((cur - s["price"]) / s["price"]) * 100
+                qty = s["amount"] / s["price"]
+                dpl = (cur - s["price"]) * qty
+                if s["type"] == "SELL": pct, dpl = -pct, -dpl
                 total += dpl
-                report.append(f"  - {s['type']} {s['asset']}: Signal ${s['price']:,.2f}, Now ${cur:,.2f}. P/L: {'📈' if dpl>=0 else '📉'} {pct:+.2f}% (${dpl:+.2f})")
-        if len(signals) > 1: report.append(f"\nTotal Run P/L: {'✅' if total>=0 else '❌'} ${total:+.2f}")
-    with open(REPORT_FILE, 'w') as f: f.write("\n".join(report))
+                report.append(f"  - {s["type"]} {s["asset"]}: Signal ${s["price"]:,.2f}, Now ${cur:,.2f}. P/L: {"📈" if dpl>=0 else "📉"} {pct:+.2f}% (${dpl:+.2f})")
+        if len(signals) > 1:
+            report.append(f"\nTotal Run P/L: {"✅" if total>=0 else "❌"} ${total:+.2f}")
+            
+    with open(REPORT_FILE, "w") as f:
+        f.write("\n".join(report))
 
 if __name__ == "__main__": generate_report(parse_logs_for_signals())
