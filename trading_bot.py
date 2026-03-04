@@ -158,7 +158,7 @@ class EthereumExecutor:
                 "gas": 60000, "gasPrice": self.w3.eth.gas_price
             })
             signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-            self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             logging.info("Approval transaction sent. Waiting 5s...")
             time.sleep(5)
 
@@ -232,7 +232,7 @@ class EthereumExecutor:
 
             if self.simulate_transaction(tx):
                 signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-                tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+                tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                 logging.info(f"🚀 Uniswap V3 Trade Sent! Hash: {tx_hash.hex()}")
             else:
                 logging.warning("Simulation failed. Trade aborted.")
