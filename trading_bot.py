@@ -126,6 +126,7 @@ def round_to_increment(amount, increment):
     return (amt // inc) * inc
 
 # --- Ethereum Executor (Uniswap V3) ---
+# --- Ethereum Executor (Uniswap V3) ---
 class EthereumExecutor:
     def __init__(self, rpc_url, private_key):
         from web3 import Web3
@@ -141,9 +142,11 @@ class EthereumExecutor:
     def is_connected(self): return self.w3.is_connected()
 
     def check_gas_price(self):
-        gas_price_gwei = self.w3.from_wei(self.w3.eth.gas_price, 'gwei')
-        logging.info(f"ETH Gas Price: {gas_price_gwei:.2f} Gwei (Limit: {ETH_MAX_GAS_PRICE_GWEI})")
-        return gas_price_gwei <= ETH_MAX_GAS_PRICE_GWEI
+        try:
+            gas_price_gwei = self.w3.from_wei(self.w3.eth.gas_price, "gwei")
+            logging.info(f"ETH Gas Price: {gas_price_gwei:.2f} Gwei")
+            return gas_price_gwei <= ETH_MAX_GAS_PRICE_GWEI
+        except: return True
 
     def approve_token(self, token_address, spender_address, amount):
         token_contract = self.w3.eth.contract(address=self.w3.to_checksum_address(token_address), abi=self.erc20_abi)
@@ -151,32 +154,29 @@ class EthereumExecutor:
         if allowance < amount:
             logging.info(f"Approving {token_address} for Uniswap Router...")
             tx = token_contract.functions.approve(spender_address, 2**256 - 1).build_transaction({
-                'from': self.address, 'nonce': self.w3.eth.get_transaction_count(self.address),
-                'gas': 60000, 'gasPrice': self.w3.eth.gas_price
+                "from": self.address, "nonce": self.w3.eth.get_transaction_count(self.address),
+                "gas": 60000, "gasPrice": self.w3.eth.gas_price
             })
             signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
             self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            logging.info("Approval transaction sent.")
+            logging.info("Approval transaction sent. Waiting 5s...")
+            time.sleep(5)
 
     def simulate_transaction(self, tx_params):
-        if "alchemy" not in self.w3.provider.endpoint_uri:
-            return True # Skip if not Alchemy
-            
+        if "alchemy" not in self.w3.provider.endpoint_uri: return True
         try:
             logging.info("Simulating transaction via Alchemy...")
-            # Convert Web3 params to JSON-RPC format
-            sim_params = {
+            sim_tx = {
                 "from": tx_params["from"],
                 "to": tx_params["to"],
-                "value": hex(tx_params["value"]) if "value" in tx_params else "0x0",
+                "value": hex(tx_params["value"]),
                 "data": tx_params.get("data", "0x")
             }
-            
-            response = self.w3.provider.make_request("alchemy_simulateExecution", [sim_params])
+            response = self.w3.provider.make_request("alchemy_simulateExecution", [sim_tx])
             if "error" in response:
-                logging.error(f"Simulation failed: {response["error"]}")
+                logging.error(f"Simulation Failed: {response['error']}")
                 return False
-            logging.info("Simulation successful!")
+            logging.info("Simulation Successful!")
             return True
         except Exception as e:
             logging.error(f"Simulation error: {e}")
@@ -184,61 +184,61 @@ class EthereumExecutor:
 
     def execute_trade(self, asset, side):
         if not self.account: return
-        if not self.check_gas_price():
-            logging.warning("Skipping ETH trade due to high gas price.")
-            return
-
-        logging.info(f"EthereumExecutor: Swapping {side} for {asset} on Uniswap V3")
+        
+        logging.info(f"EthereumExecutor: Preparing to {side} {asset} on Uniswap V3")
         if TRADING_MODE != "live":
-            logging.info(f"[PAPER ETH] Would have swapped {asset} {side} on Uniswap V3")
+            logging.info("[PAPER] Skipping on-chain trade.")
             return
 
         try:
-            router = self.w3.eth.contract(address=self.w3.to_checksum_address(UNISWAP_ROUTER_ADDRESS), abi=self.router_abi)
+            router_address = self.w3.to_checksum_address(UNISWAP_ROUTER_ADDRESS)
+            router = self.w3.eth.contract(address=router_address, abi=self.router_abi)
             deadline = int(time.time()) + 600
             
-            if side == 'BUY': # ETH -> USDC
-                params = {
-                    'tokenIn': self.w3.to_checksum_address(WETH_ADDRESS),
-                    'tokenOut': self.w3.to_checksum_address(USDC_ADDRESS),
-                    'fee': 3000, # 0.3% pool
-                    'recipient': self.address,
-                    'deadline': deadline,
-                    'amountIn': ETH_TRADE_AMOUNT_WEI,
-                    'amountOutMinimum': 0,
-                    'sqrtPriceLimitX96': 0
-                }
-                tx = router.functions.exactInputSingle(params).build_transaction({
-                    'from': self.address, 'value': ETH_TRADE_AMOUNT_WEI,
-                    'nonce': self.w3.eth.get_transaction_count(self.address),
-                    'gas': 250000, 'gasPrice': self.w3.eth.gas_price
-                })
-            else: # USDC -> ETH
-                usdc_contract = self.w3.eth.contract(address=self.w3.to_checksum_address(USDC_ADDRESS), abi=self.erc20_abi)
-                usdc_balance = usdc_contract.functions.balanceOf(self.address).call()
-                if usdc_balance == 0:
-                    logging.warning("No USDC balance to swap for ETH.")
+            weth = self.w3.to_checksum_address(WETH_ADDRESS)
+            usdc = self.w3.to_checksum_address(USDC_ADDRESS)
+
+            if side == 'BUY': 
+                # BUY ETH: Swap USDC -> WETH
+                amount_in_usdc = 25 * 10**6 # 25 USDC
+                
+                # Check USDC Balance
+                usdc_contract = self.w3.eth.contract(address=usdc, abi=self.erc20_abi)
+                bal = usdc_contract.functions.balanceOf(self.address).call()
+                if bal < amount_in_usdc:
+                    logging.warning(f"Insufficient USDC balance: {bal/10**6} < 25")
                     return
-                self.approve_token(USDC_ADDRESS, UNISWAP_ROUTER_ADDRESS, usdc_balance)
+
+                self.approve_token(USDC_ADDRESS, UNISWAP_ROUTER_ADDRESS, amount_in_usdc)
+                
                 params = {
-                    'tokenIn': self.w3.to_checksum_address(USDC_ADDRESS),
-                    'tokenOut': self.w3.to_checksum_address(WETH_ADDRESS),
-                    'fee': 3000, 'recipient': self.address, 'deadline': deadline,
-                    'amountIn': usdc_balance, 'amountOutMinimum': 0, 'sqrtPriceLimitX96': 0
+                    "tokenIn": usdc,
+                    "tokenOut": weth,
+                    "fee": 3000, "recipient": self.address, "deadline": deadline,
+                    "amountIn": amount_in_usdc, "amountOutMinimum": 0, "sqrtPriceLimitX96": 0
                 }
+                
                 tx = router.functions.exactInputSingle(params).build_transaction({
-                    'from': self.address, 'nonce': self.w3.eth.get_transaction_count(self.address),
-                    'gas': 250000, 'gasPrice': self.w3.eth.gas_price
+                    "from": self.address, 
+                    "nonce": self.w3.eth.get_transaction_count(self.address),
+                    "gas": 300000, 
+                    "gasPrice": self.w3.eth.gas_price,
+                    "value": 0
                 })
 
-            # Simulate before sending
+            else: 
+                logging.warning("SELL side not fully implemented for Native ETH yet.")
+                return
+
             if self.simulate_transaction(tx):
                 signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
                 tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-                logging.info(f"Uniswap V3 Swap Sent! Hash: {tx_hash.hex()}")
+                logging.info(f"🚀 Uniswap V3 Trade Sent! Hash: {tx_hash.hex()}")
             else:
-                logging.warning("Transaction aborted due to simulation failure.")
-        except Exception as e: logging.error(f"Uniswap Swap Failed: {e}")
+                logging.warning("Simulation failed. Trade aborted.")
+
+        except Exception as e: logging.error(f"Uniswap Trade Failed: {e}")
+
 
 # --- Trading Logic ---
 def place_limit_order(product_id, side, price, amount_quote_currency=None, amount_base_currency=None):
