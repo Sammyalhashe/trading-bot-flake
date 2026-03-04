@@ -10,167 +10,97 @@ import urllib.parse
 from datetime import datetime, timedelta
 from cryptography.hazmat.primitives import serialization
 
-# --- Configuration ---
 LOG_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/trading.log"
 API_JSON_FILE = "/home/salhashemi2/cdb_api_key.json"
 REPORT_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/report.txt"
 
-# --- Authentication & API Logic ---
 def get_credentials():
-    if not os.path.exists(API_JSON_FILE):
-        raise FileNotFoundError(f"API credentials file not found at {API_JSON_FILE}")
-    with open(API_JSON_FILE, 'r') as f:
-        data = json.load(f)
-    api_key_name = data.get('name')
-    private_key_pem = data.get('privateKey')
-    if not api_key_name or not private_key_pem:
-        raise ValueError("Error: 'name' or 'privateKey' not found in JSON file.")
-    return api_key_name, private_key_pem
+    with open(API_JSON_FILE, 'r') as f: data = json.load(f)
+    return data.get('name'), data.get('privateKey')
 
-def build_jwt(api_key_name, private_key_pem, service, uri):
-    private_key = serialization.load_pem_private_key(private_key_pem.encode('utf-8'), password=None)
-    jwt_payload = {
-        "iss": "cdp", "nbf": int(time.time()), "exp": int(time.time()) + 120,
-        "sub": api_key_name, "uri": f"{service} {uri}"
-    }
-    return jwt.encode(jwt_payload, private_key, algorithm="ES256", headers={"kid": api_key_name, "nonce": secrets.token_hex()})
+def build_jwt(name, key, service, uri):
+    pk = serialization.load_pem_private_key(key.encode('utf-8'), None)
+    payload = {"iss":"cdp","nbf":int(time.time()),"exp":int(time.time())+120,"sub":name,"uri":f"{service} {uri}"}
+    return jwt.encode(payload, pk, "ES256", headers={"kid":name,"nonce":secrets.token_hex()})
 
-def coinbase_request(method, path, body=None):
+def coinbase_request(method, path):
     try:
-        api_key_name, private_key = get_credentials()
+        name, key = get_credentials()
         host = "api.coinbase.com"
-        full_request_uri = f"https://{host}{path}"
-        path_for_jwt = urllib.parse.urlparse(path).path
-        jwt_uri_suffix = f"{host}{path_for_jwt}"
-        token = build_jwt(api_key_name, private_key, method, jwt_uri_suffix)
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        response = requests.get(full_request_uri, headers=headers, timeout=15)
-        response.raise_for_status()
-        return response.json()
-    except Exception:
-        return None
+        token = build_jwt(name, key, method, f"{host}{urllib.parse.urlparse(path).path}")
+        return requests.get(f"https://{host}{path}", headers={"Authorization":f"Bearer {token}"}, timeout=15).json()
+    except: return None
 
-def get_current_price(product_id):
-    path = f"/api/v3/brokerage/products/{product_id}"
-    data = coinbase_request("GET", path)
-    return float(data['price']) if data and 'price' in data else None
-
-# --- Main Reporting Logic ---
-
-def get_latest_log_run_lines():
-    """
-    Reads the entire log file and returns the lines corresponding to the
-    most recent complete run.
-    """
-    if not os.path.exists(LOG_FILE):
-        return []
-
-    with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-    
-    # Find the start of the last run
-    last_run_start_index = content.rfind("--- 🤖 Starting Crypto Bot Run ---")
-    if last_run_start_index == -1:
-        return []
-    
-    # Get the content of the last run
-    last_run_content = content[last_run_start_index:]
-    return last_run_content.strip().split('\n')
-
+def get_current_price(pid):
+    try: return float(coinbase_request("GET", f"/api/v3/brokerage/products/{pid}")['price'])
+    except: return None
 
 def parse_logs_for_signals():
-    """Parses the most recent run from the log file for trade signals."""
-    lines = get_latest_log_run_lines()
-    if not lines:
-        return []
-
+    if not os.path.exists(LOG_FILE): return []
+    with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f: full = f.read()
+    marker = "--- 🤖 Crypto Bot Run"
+    idx = full.rfind(marker)
+    if idx == -1: return []
+    lines = full[idx:].strip().split('\n')
     signals = []
-    
-    # Regex to find any signal line from the log
-    signal_regex = re.compile(r"INFO - SIGNAL (BUY|SELL): ([\d.]+) (?:of )?([\w]+)")
-
-    for line in lines:
-        match = signal_regex.search(line)
-        if match:
-            signal_type, amount, asset = match.groups()
-            
-            # Find the price for this asset just before the signal
-            price_at_signal = None
-            
-            # Get the timestamp of the signal line to search backwards
-            try:
-                line_timestamp_str = line.split(',')[0]
-                line_dt = datetime.strptime(line_timestamp_str, "%Y-%m-%d %H:%M:%S")
-            except (ValueError, IndexError):
-                continue # Skip if the line format is unexpected
-
-            # Search for the price log entry immediately preceding this signal
-            for sub_line in reversed(lines[:lines.index(line)]):
-                if f"INFO - {asset}-USD: Price=" in sub_line:
+    reg = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?SIGNAL (BUY|SELL): \$?([\d,.]+) (?:of )?([\w-]+)")
+    for i, line in enumerate(lines):
+        m = reg.search(line)
+        if m:
+            ts, stype, amt_str, asset_raw = m.groups()
+            asset = asset_raw.split("-")[0]
+            price = None
+            for j in range(i-1, max(0, i-40), -1):
+                if f"{asset}-USDC: Price=" in lines[j]:
                     try:
-                        price_str = sub_line.split('$')[-1]
-                        price_at_signal = float(price_str)
-                        break # Found the most recent price
-                    except (ValueError, IndexError):
-                        continue
-            
-            if price_at_signal:
-                signals.append({
-                    "asset": asset,
-                    "type": signal_type,
-                    "amount": float(amount),
-                    "price_at_signal": price_at_signal
-                })
-                
+                        price = float(lines[j].split("Price=$")[-1].split(", MA")[0].replace(",", "").strip())
+                        break
+                    except: continue
+            if price: signals.append({"asset":asset, "type":stype, "amount":float(amt_str.replace(",","")), "price":price, "ts":ts})
     return signals
 
 
+def get_all_balances():
+    all_accounts = []
+    path = "/api/v3/brokerage/accounts"
+    while True:
+        data = coinbase_request("GET", path)
+        if not data: break
+        all_accounts.extend(data["accounts"])
+        if not data.get("has_next"): break
+        path = f"/api/v3/brokerage/accounts?cursor={data["cursor"]}"
+    balances = {"USD": 0.0, "USDC": 0.0}
+    for acc in all_accounts:
+        cur, val = acc["currency"], float(acc["available_balance"]["value"])
+        if cur in balances: balances[cur] = val
+    return balances
+
 def generate_report(signals):
-    """Generates and sends a performance report."""
-    report_lines = ["--- 🤖 Trading Bot Report (Last 24H) ---"]
+    report = ["--- 🤖 Trading Bot Report ---"]
+    status = "Unknown"
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r') as f:
+            for line in reversed(f.readlines()[-100:]):
+                if ("Market Regime:" in line or "Market:" in line) and "Portfolio" not in line:
+                    status = line.split(":")[-1].strip(); break
+    report.append(f"Market Status: {status}\n")
+    balances = get_all_balances()
+    total_cash = balances["USD"] + balances["USDC"]
+    report.append(f"Portfolio Cash: ${total_cash:,.2f} (USD: ${balances["USD"]:,.2f}, USDC: ${balances["USDC"]:,.2f})\n")
     
-    if not signals:
-        report_lines.append("\nNo actionable trading signals found in the logs.")
-        with open(REPORT_FILE, 'w') as f:
-            f.write("\n".join(report_lines))
-        return
+    if not signals: report.append("No new trading signals in the last run.")
+    else:
+        total = 0.0
+        for s in signals:
+            cur = get_current_price(f"{s['asset']}-USDC")
+            if cur:
+                pct = ((cur - s['price']) / s['price']) * 100
+                qty = s['amount'] / s['price']
+                dpl = (cur - s['price']) * qty
+                if s['type'] == "SELL": pct, dpl = -pct, -dpl
+                total += dpl
+                report.append(f"  - {s['type']} {s['asset']}: Signal ${s['price']:,.2f}, Now ${cur:,.2f}. P/L: {'📈' if dpl>=0 else '📉'} {pct:+.2f}% (${dpl:+.2f})")
+        if len(signals) > 1: report.append(f"\nTotal Run P/L: {'✅' if total>=0 else '❌'} ${total:+.2f}")
+    with open(REPORT_FILE, 'w') as f: f.write("\n".join(report))
 
-    total_performance = 0.0
-    for signal in signals:
-        asset = signal['asset']
-        product_id = f"{asset}-USD"
-        current_price = get_current_price(product_id)
-        
-        if current_price is None:
-            report_lines.append(f"Could not fetch current price for {asset}.")
-            continue
-
-        price_at_signal = signal['price_at_signal']
-        amount = signal['amount']
-        signal_type = signal['type']
-        
-        performance = 0.0
-        if signal_type == "BUY":
-            performance = (current_price - price_at_signal) * amount
-            change_char = "📈" if performance >= 0 else "📉"
-            report_lines.append(f"  - BUY {asset}: Signal ${price_at_signal:,.2f}, Now ${current_price:,.2f}. P/L: {change_char} ${performance:,.2f}")
-        
-        elif signal_type == "SELL":
-            performance = (price_at_signal - current_price) * amount
-            change_char = "📈" if performance >= 0 else "📉"
-            report_lines.append(f"  - SELL {asset}: Signal ${price_at_signal:,.2f}, Now ${current_price:,.2f}. Avoided Loss: {change_char} ${performance:,.2f}")
-        
-        total_performance += performance
-
-    report_lines.append("\n---------------------------------------------------------")
-    final_change_char = "✅" if total_performance >= 0 else "❌"
-    report_lines.append(f"Total Estimated P/L: {final_change_char} ${total_performance:,.2f}")
-    report_lines.append("---------------------------------------------------------")
-    report_lines.append("\nDisclaimer: Paper trading summary. No real trades executed.")
-    
-    with open(REPORT_FILE, 'w') as f:
-        f.write("\n".join(report_lines))
-
-if __name__ == "__main__":
-    signals = parse_logs_for_signals()
-    generate_report(signals)
+if __name__ == "__main__": generate_report(parse_logs_for_signals())
