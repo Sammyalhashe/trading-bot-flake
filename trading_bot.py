@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 import os
 import time
-import secrets
-import jwt
 import datetime
-import requests
 import pandas as pd
-from cryptography.hazmat.primitives import serialization
-import uuid
 import json
 import logging
 import sys
 from pathlib import Path
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
+
+# Import specialized executors
+from coinbase_executor import CoinbaseExecutor
+from ethereum_executor import EthereumExecutor
 
 # --- Logging Configuration ---
 LOG_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/trading.log"
@@ -47,9 +46,6 @@ ASSET_BLACKLIST = ["DOGE", "SHLD", "SHIB"]
 MOMENTUM_WINDOW_HOURS = 24
 TOP_MOMENTUM_COUNT = 3
 
-# --- Globals ---
-PRODUCT_DETAILS_CACHE = {}
-
 # --- State Management ---
 def load_state():
     default_state = {"entry_prices": {}}
@@ -75,61 +71,10 @@ def clear_entry_price(product_id):
         del state["entry_prices"][product_id]
         save_state(state)
 
-# --- Authentication & API Requests ---
-def get_credentials():
-    with open(API_JSON_FILE, 'r') as f: data = json.load(f)
-    return data.get('name'), data.get('privateKey')
-
-def build_jwt(api_key_name, private_key_pem, service, uri):
-    private_key = serialization.load_pem_private_key(private_key_pem.encode('utf-8'), password=None)
-    jwt_payload = {"iss": "cdp", "nbf": int(time.time()), "exp": int(time.time()) + 120, "sub": api_key_name, "uri": f"{service} {uri}"}
-    return jwt.encode(jwt_payload, private_key, algorithm="ES256", headers={"kid": api_key_name, "nonce": secrets.token_hex()})
-
-import urllib.parse
-def coinbase_request(method, path, body=None):
-    try:
-        api_key_name, private_key = get_credentials()
-        host = "api.coinbase.com"
-        path_for_jwt = urllib.parse.urlparse(path).path
-        token = build_jwt(api_key_name, private_key, method, f"{host}{path_for_jwt}")
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        response = requests.request(method.upper(), f"https://{host}{path}", headers=headers, json=body, timeout=15)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e: logging.error(f"Coinbase request failed: {e}")
-    return None
-
-def get_product_details(product_id):
-    if product_id in PRODUCT_DETAILS_CACHE: return PRODUCT_DETAILS_CACHE[product_id]
-    data = coinbase_request("GET", f"/api/v3/brokerage/products/{product_id}")
-    if data: PRODUCT_DETAILS_CACHE[product_id] = data
-    return data
-
 def round_to_increment(amount, increment):
     inc = Decimal(str(increment))
     amt = Decimal(str(amount))
     return (amt // inc) * inc
-
-def cancel_open_orders(product_id):
-    """Cancel all open orders for a specific product to free up balance."""
-    logging.info(f"Cancelling open orders for {product_id}...")
-    path = f"/api/v3/brokerage/orders/historical/batch?order_status=OPEN&product_id={product_id}"
-    orders = coinbase_request("GET", path)
-    if orders and "orders" in orders:
-        order_ids = [o["order_id"] for o in orders["orders"]]
-        if order_ids:
-            logging.info(f"Cancelling {len(order_ids)} orders: {order_ids}")
-            coinbase_request("POST", "/api/v3/brokerage/orders/batch_cancel", {"order_ids": order_ids})
-            time.sleep(1)
-
-def get_best_bid_ask(product_id):
-    """Fetch the best bid and ask to ensure we place 'Maker' orders."""
-    book = coinbase_request("GET", f"/api/v3/brokerage/product_book?product_id={product_id}&limit=1")
-    if book and "pricebook" in book and book["pricebook"]["bids"] and book["pricebook"]["asks"]:
-        best_bid = float(book["pricebook"]["bids"][0]["price"])
-        best_ask = float(book["pricebook"]["asks"][0]["price"])
-        return best_bid, best_ask
-    return None, None
 
 # --- Trading Logic ---
 def place_limit_order(product_id, side, price, amount_quote_currency=None, amount_base_currency=None):
@@ -248,21 +193,30 @@ def is_asset_blacklisted(asset):
     return asset.upper() in [a.upper() for a in ASSET_BLACKLIST]
 
 def run_bot(reset_to_usdc=False):
+    # Initialize Executor (Defaults to Coinbase, supports Ethereum toggle)
+    if ENABLE_ETHEREUM:
+        logging.info("Ethereum Executor enabled (Placeholder mode)")
+        # executor = EthereumExecutor(ETH_RPC_URL, ETH_PRIVATE_KEY, TRADING_MODE)
+        # For now, we still use Coinbase as the primary implementation
+        executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+    else:
+        executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+
     logging.info(f"--- 🤖 Crypto Bot Run ({TRADING_MODE.upper()}) ---")
     LAST_RUN_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/last_run.txt"
     os.makedirs(os.path.dirname(LAST_RUN_FILE), exist_ok=True)
     with open(LAST_RUN_FILE, "w") as f: f.write(datetime.datetime.now().isoformat())
 
-    balances = get_all_balances()
+    balances = executor.get_balances()
     cash, held, state = balances["cash"], balances["crypto"], load_state()
     
     total_value = sum(cash.values())
     for cur, amt in held.items():
-        details = get_product_details(f"{cur}-USDC")
+        details = executor.get_product_details(f"{cur}-USDC")
         if details: total_value += amt * float(details['price'])
 
     trade_limit = total_value * PORTFOLIO_RISK_PERCENTAGE
-    btc_df = get_market_data("BTC-USDC")
+    btc_df = executor.get_market_data("BTC-USDC", LONG_WINDOW)
     btc_s, btc_l = analyze_trend(btc_df)
     btc_trend = "BEAR" if btc_s and btc_l and btc_s < btc_l else "BULL"
     logging.info(f"Market: {btc_trend}. Portfolio: ${total_value:,.2f}")
@@ -273,7 +227,7 @@ def run_bot(reset_to_usdc=False):
         for asset, amount in held.items():
             if asset in ["USD", "USDC"]: continue
             if is_asset_blacklisted(asset): continue
-            place_market_order(f"{asset}-USDC", 'SELL', amount_base_currency=amount)
+            executor.place_market_order(f"{asset}-USDC", 'SELL', amount_base_currency=amount)
             clear_entry_price(f"{asset}-USDC")
         return
 
@@ -282,7 +236,7 @@ def run_bot(reset_to_usdc=False):
         if asset in ["USD", "USDC"] or is_asset_blacklisted(asset): continue
         product_id = f"{asset}-USDC"
         try:
-            df = get_market_data(product_id)
+            df = executor.get_market_data(product_id, LONG_WINDOW)
             ma_s, ma_l = analyze_trend(df)
             if ma_s and ma_l and ma_s > ma_l * 1.002 and (btc_trend == "BULL" or asset == "BTC"):
                 asset_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
@@ -293,10 +247,10 @@ def run_bot(reset_to_usdc=False):
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
         try:
-            price = float(get_product_details(product_id)['price'])
+            price = float(executor.get_product_details(product_id)['price'])
             buy_size = min(available_usdc * RISK_PER_TRADE_PCT / TOP_MOMENTUM_COUNT, trade_limit / TOP_MOMENTUM_COUNT)
             if buy_size > 10:
-                if place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size):
+                if executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size):
                     update_entry_price(product_id, price)
                     available_usdc -= buy_size
         except: pass
@@ -305,17 +259,17 @@ def run_bot(reset_to_usdc=False):
         if asset in ["USD", "USDC"]: continue
         product_id = f"{asset}-USDC"
         try:
-            price = float(get_product_details(product_id)['price'])
+            price = float(executor.get_product_details(product_id)['price'])
             entry = state.get("entry_prices", {}).get(product_id)
             if entry and price < entry * (1 - STOP_LOSS_PCT):
-                place_limit_order(product_id, 'SELL', price, amount_base_currency=held[asset])
+                executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=held[asset])
                 clear_entry_price(product_id)
                 continue
             
-            df = get_market_data(product_id)
+            df = executor.get_market_data(product_id, LONG_WINDOW)
             ma_s, ma_l = analyze_trend(df)
             if ma_s and ma_l and ma_s < ma_l * 0.998:
-                place_limit_order(product_id, 'SELL', price, amount_base_currency=held[asset] * 0.5)
+                executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=held[asset] * 0.5)
         except: pass
 
 if __name__ == "__main__":

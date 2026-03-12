@@ -12,7 +12,7 @@
         pkgs = import nixpkgs { inherit system; };
 
         pythonDependencies = ps: with ps;
-          [ requests pandas pyjwt cryptography pytest ];
+          [ requests pandas pyjwt cryptography pytest web3 ];
 
         pythonEnv = pkgs.python3.withPackages pythonDependencies;
 
@@ -27,16 +27,25 @@
           installPhase = ''
             mkdir -p $out/bin
             
-            # Install trading bot
-            cp $src/trading_bot.py $out/bin/trading-bot
+            # Copy all python files to bin (they will be in the same dir)
+            cp $src/*.py $out/bin/
+
+            # Rename main entry point
+            mv $out/bin/trading_bot.py $out/bin/trading-bot
             chmod +x $out/bin/trading-bot
             wrapProgram $out/bin/trading-bot \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
 
-            # Install report bot
-            cp $src/report_bot.py $out/bin/trading-report
+            # Rename report bot
+            mv $out/bin/report_bot.py $out/bin/trading-report
             chmod +x $out/bin/trading-report
             wrapProgram $out/bin/trading-report \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+
+            # Rename notify bot
+            mv $out/bin/notify_telegram.py $out/bin/trading-notify
+            chmod +x $out/bin/notify-telegram
+            wrapProgram $out/bin/trading-notify \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
           '';
         };
@@ -49,6 +58,10 @@
           report = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/trading-report";
+          };
+          notify = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/trading-notify";
           };
         };
 
