@@ -20,13 +20,13 @@
       "tp2_hit": false
     }
   },
-  "peak_portfolio_value": 0.0,
   "performance": {
     "total_trades": 0,
     "winning_trades": 0,
     "losing_trades": 0,
     "total_pnl": 0.0,
-    "run_count": 8,
-    "last_run_time": "2026-03-13T14:36:44.623319"
-  }
+    "run_count": 9,
+    "last_run_time": "2026-03-13T14:40:20.002928"
+  },
+  "peak_portfolio_values": {}
 }

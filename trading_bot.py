@@ -129,13 +129,15 @@ def clear_entry_price(executor_id, product_id):
         del state["take_profit_flags"][key]
     save_state(state)
 
-def load_peak_value():
+def load_peak_value(executor_id="default"):
     state = load_state()
-    return state.get("peak_portfolio_value", 0.0)
+    peaks = state.get("peak_portfolio_values", {})
+    return peaks.get(executor_id, 0.0)
 
-def save_peak_value(value):
+def save_peak_value(value, executor_id="default"):
     state = load_state()
-    state["peak_portfolio_value"] = value
+    peaks = state.setdefault("peak_portfolio_values", {})
+    peaks[executor_id] = value
     save_state(state)
 
 def record_trade(is_win, pnl):
@@ -202,14 +204,14 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash:,.2f}")
     
-    # Update peak value and check drawdown
-    peak = load_peak_value()
+    # Update peak value and check drawdown (per-executor)
+    peak = load_peak_value(ex_id)
     if peak == 0.0:
         # First run — initialize peak to current value
-        save_peak_value(ex_value)
+        save_peak_value(ex_value, ex_id)
         peak = ex_value
     elif ex_value > peak:
-        save_peak_value(ex_value)
+        save_peak_value(ex_value, ex_id)
         peak = ex_value
     drawdown_pct = ((peak - ex_value) / peak * 100) if peak > 0 else 0
     
