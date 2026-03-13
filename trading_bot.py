@@ -243,12 +243,15 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
             price_data = data_provider.get_product_details(product_id)
             price = float(price_data['price'])
             buy_size = min(available_usdc * RISK_PER_TRADE_PCT / TOP_MOMENTUM_COUNT, trade_limit / TOP_MOMENTUM_COUNT)
-            # Enforce MAX_POSITION_USD
-            current_crypto_value = sum(amt * float(data_provider.get_product_details(get_data_product_id(a))['price']) 
-                                        for a, amt in held.items() if data_provider.get_product_details(get_data_product_id(a)))
-            if current_crypto_value + buy_size > MAX_POSITION_USD:
-                logging.info(f"[{ex_id}] Skipping {asset} buy: would exceed MAX_POSITION_USD (${MAX_POSITION_USD:,.0f})")
-                continue
+            # Enforce MAX_POSITION_USD per-asset position cap
+            current_asset_value = held.get(asset, 0) * price
+            if current_asset_value + buy_size > MAX_POSITION_USD:
+                # Cap buy_size to stay within limit
+                buy_size = max(0, MAX_POSITION_USD - current_asset_value)
+                if buy_size < MIN_ORDER_USD:
+                    logging.info(f"[{ex_id}] Skipping {asset}: position at ${current_asset_value:,.0f} already at/exceeds MAX_POSITION_USD (${MAX_POSITION_USD:,.0f})")
+                    continue
+                logging.info(f"[{ex_id}] Capped {asset} buy to ${buy_size:,.2f} to stay within MAX_POSITION_USD")
             if drawdown_pct >= MAX_DRAWDOWN_PCT:
                 continue  # Skip buys during drawdown
             if buy_size > MIN_ORDER_USD:
