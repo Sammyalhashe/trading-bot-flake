@@ -44,7 +44,7 @@
 
             # Rename notify bot
             mv $out/bin/notify_telegram.py $out/bin/trading-notify
-            chmod +x $out/bin/notify-telegram
+            chmod +x $out/bin/trading-notify
             wrapProgram $out/bin/trading-notify \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
           '';
