@@ -204,7 +204,11 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     
     # Update peak value and check drawdown
     peak = load_peak_value()
-    if ex_value > peak:
+    if peak == 0.0:
+        # First run — initialize peak to current value
+        save_peak_value(ex_value)
+        peak = ex_value
+    elif ex_value > peak:
         save_peak_value(ex_value)
         peak = ex_value
     drawdown_pct = ((peak - ex_value) / peak * 100) if peak > 0 else 0
