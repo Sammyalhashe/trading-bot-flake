@@ -9,8 +9,6 @@
     "ICP-USDC": 2.616,
     "MLN-USDC": 3.75,
     "ETH-USDC": 2072.16,
-    "CoinbaseExecutor:ETH-USDC": 2104.48,
-    "CoinbaseExecutor:BTC-USDC": 71119.39,
-    "CoinbaseExecutor:POL-USDC": 0.0993
+    "CoinbaseExecutor:ETH-USDC": 2106.81
   }
 }
