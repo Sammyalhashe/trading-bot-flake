@@ -75,7 +75,6 @@ TOKENS = {
     "BTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",    # WBTC
     "DEGEN": "0x4ed4E281562193f5C8c11259D3e21839951e7d23",
     "AERO": "0x9401811A062933285c64D72A25e8e3cf24f3fFBE",
-    "POL": "0x4edd6d3c96ba47d1c6f6b31c4d3b8e0b9e0b9e0b",  # placeholder, need correct address
     "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
 }
 
@@ -147,6 +146,10 @@ class EthereumExecutor:
         self.private_key = private_key
         self.trading_mode = trading_mode
 
+        # RPC failover tracking
+        self._current_rpc_index = 0
+        self._rpc_endpoints = [rpc_url] + [r for r in FALLBACK_RPCS if r != rpc_url]
+
         # Caches to minimize RPC calls
         self._decimals_cache = {}
         self._allowance_cache = {}
@@ -174,6 +177,47 @@ class EthereumExecutor:
             address=Web3.to_checksum_address(QUOTER_ADDRESS),
             abi=QUOTER_ABI
         )
+
+    def _rotate_rpc(self):
+        """Rotate to the next available RPC endpoint."""
+        old_index = self._current_rpc_index
+        self._current_rpc_index = (self._current_rpc_index + 1) % len(self._rpc_endpoints)
+        new_rpc = self._rpc_endpoints[self._current_rpc_index]
+        logging.warning(f"Rotating RPC from index {old_index} to {self._current_rpc_index}: {new_rpc}")
+        self.w3 = Web3(Web3.HTTPProvider(new_rpc, request_kwargs={'timeout': 30}))
+        # Recreate contracts with new provider
+        self.router_contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(SWAP_ROUTER_ADDRESS),
+            abi=SWAP_ROUTER_ABI
+        )
+        self.quoter_contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(QUOTER_ADDRESS),
+            abi=QUOTER_ABI
+        )
+
+    def _call_with_failover(self, func):
+        """Execute a read-only RPC call with failover across RPC endpoints.
+
+        Only use this for read calls (get_balances, get_product_details, get_quote),
+        NOT for write calls (execute_swap, _approve_token) to avoid nonce issues.
+        """
+        last_exception = None
+        for _ in range(len(self._rpc_endpoints)):
+            try:
+                return func()
+            except Exception as e:
+                error_str = str(e).lower()
+                is_connection_error = any(kw in error_str for kw in [
+                    "connection", "timeout", "timed out", "connectionerror",
+                    "maxretryerror", "remotedisconnected", "eof",
+                ])
+                if is_connection_error:
+                    last_exception = e
+                    logging.warning(f"RPC connection error, attempting failover: {str(e)[:100]}")
+                    self._rotate_rpc()
+                else:
+                    raise
+        raise last_exception
 
     def _get_decimals(self, token_address):
         """Get token decimals with caching - uses known values to avoid RPC calls."""
@@ -249,61 +293,69 @@ class EthereumExecutor:
             logging.debug(f"Could not check balance for {symbol} ({address}): {e}")
 
     def get_balances(self):
-        """Fetch ETH and key ERC20 balances on Base. Minimizes RPC calls."""
-        if not self.account:
-            return {"cash": {"USDC": 0.0}, "crypto": {}}
+        """Fetch ETH and key ERC20 balances on Base. Minimizes RPC calls.
+        Uses RPC failover for connection errors."""
+        def _do_get_balances():
+            if not self.account:
+                return {"cash": {"USDC": 0.0}, "crypto": {}}
 
-        balances = {"cash": {"USDC": 0.0}, "crypto": {}}
+            balances = {"cash": {"USDC": 0.0}, "crypto": {}}
 
-        # 1. Native ETH (Gas) - 1 RPC call
-        try:
-            def _fetch_eth_balance():
-                return self.w3.eth.get_balance(self.account.address)
-            eth_bal = retry_rpc_call(_fetch_eth_balance)
-            balances["crypto"]["ETH_NATIVE"] = float(self.w3.from_wei(eth_bal, 'ether'))
-        except Exception as e:
-            logging.debug(f"Could not fetch native ETH balance: {e}")
+            # 1. Native ETH (Gas) - 1 RPC call
+            try:
+                def _fetch_eth_balance():
+                    return self.w3.eth.get_balance(self.account.address)
+                eth_bal = retry_rpc_call(_fetch_eth_balance)
+                balances["crypto"]["ETH_NATIVE"] = float(self.w3.from_wei(eth_bal, 'ether'))
+            except Exception as e:
+                logging.debug(f"Could not fetch native ETH balance: {e}")
 
-        # 2. Only check essential tokens (USDC, WETH) to minimize RPC calls
-        # Other tokens can be checked on-demand if needed
-        for symbol in BALANCE_SCAN_TOKENS:
-            if symbol in TOKENS:
-                self._check_balance(balances, symbol, TOKENS[symbol])
+            # 2. Only check essential tokens (USDC, WETH) to minimize RPC calls
+            # Other tokens can be checked on-demand if needed
+            for symbol in BALANCE_SCAN_TOKENS:
+                if symbol in TOKENS:
+                    self._check_balance(balances, symbol, TOKENS[symbol])
 
-        return balances
+            return balances
+
+        return self._call_with_failover(_do_get_balances)
 
     def get_market_data(self, product_id, window):
         return None
 
     def get_product_details(self, product_id):
-        """Fetch current price from Uniswap V3 Pool on Base with retry logic."""
+        """Fetch current price from Uniswap V3 Pool on Base with retry logic.
+        Uses RPC failover for connection errors."""
         if product_id not in POOLS:
             return None
 
-        pool_address = Web3.to_checksum_address(POOLS[product_id])
+        def _do_get_product_details():
+            pool_address = Web3.to_checksum_address(POOLS[product_id])
 
-        def _fetch_price():
-            pool_contract = self.w3.eth.contract(address=pool_address, abi=UNISWAP_V3_POOL_ABI)
-            slot0 = pool_contract.functions.slot0().call()
-            sqrtPriceX96 = slot0[0]
+            def _fetch_price():
+                pool_contract = self.w3.eth.contract(address=pool_address, abi=UNISWAP_V3_POOL_ABI)
+                slot0 = pool_contract.functions.slot0().call()
+                sqrtPriceX96 = slot0[0]
 
-            price = (Decimal(sqrtPriceX96) / Decimal(2**96))**2
+                price = (Decimal(sqrtPriceX96) / Decimal(2**96))**2
 
-            # WETH/USDC: WETH(18) is token0, USDC(6) is token1. Price = 1/0 = USDC per WETH.
-            if product_id == "ETH-USDC":
-                adjusted_price = float(price * Decimal(10**12))
-            elif product_id == "BTC-USDC":
-                adjusted_price = float(price * Decimal(10**2))
-            else:
-                adjusted_price = float(price)
+                # WETH/USDC: WETH(18) is token0, USDC(6) is token1. Price = 1/0 = USDC per WETH.
+                if product_id == "ETH-USDC":
+                    adjusted_price = float(price * Decimal(10**12))
+                elif product_id == "BTC-USDC":
+                    adjusted_price = float(price * Decimal(10**2))
+                else:
+                    adjusted_price = float(price)
 
-            return {"price": str(adjusted_price), "quote_increment": "0.01", "base_increment": "0.00000001"}
+                return {"price": str(adjusted_price), "quote_increment": "0.01", "base_increment": "0.00000001"}
 
-        try:
-            return retry_rpc_call(_fetch_price, max_retries=5, base_delay=2.0)
-        except Exception as e:
-            logging.error(f"Error fetching price for {product_id} from {pool_address}: {e}")
-            return None
+            try:
+                return retry_rpc_call(_fetch_price, max_retries=5, base_delay=2.0)
+            except Exception as e:
+                logging.error(f"Error fetching price for {product_id} from {pool_address}: {e}")
+                return None
+
+        return self._call_with_failover(_do_get_product_details)
 
     def get_token_address(self, product_id):
         """Helper to find on-chain address for a product (e.g., ETH-USDC)."""
@@ -392,20 +444,24 @@ class EthereumExecutor:
             return None
 
     def get_quote(self, token_in, token_out, amount_in, fee):
-        """Get expected output amount using Quoter with retry."""
-        try:
-            def _fetch_quote():
-                return self.quoter_contract.functions.quoteExactInputSingle(
-                    Web3.to_checksum_address(token_in),
-                    Web3.to_checksum_address(token_out),
-                    fee,
-                    amount_in,
-                    0  # sqrtPriceLimitX96
-                ).call()
-            return retry_rpc_call(_fetch_quote)
-        except Exception as e:
-            logging.warning(f"Quote failed: {e}")
-            return None
+        """Get expected output amount using Quoter with retry.
+        Uses RPC failover for connection errors."""
+        def _do_get_quote():
+            try:
+                def _fetch_quote():
+                    return self.quoter_contract.functions.quoteExactInputSingle(
+                        Web3.to_checksum_address(token_in),
+                        Web3.to_checksum_address(token_out),
+                        fee,
+                        amount_in,
+                        0  # sqrtPriceLimitX96
+                    ).call()
+                return retry_rpc_call(_fetch_quote)
+            except Exception as e:
+                logging.warning(f"Quote failed: {e}")
+                return None
+
+        return self._call_with_failover(_do_get_quote)
 
     def _get_amount_out_minimum(self, token_in, token_out, amount_in, fee, slippage_bps=SLIPPAGE_BPS):
         """Calculate amountOutMinimum with slippage using Quoter."""
@@ -442,8 +498,32 @@ class EthereumExecutor:
             logging.warning(f"Could not calculate amountOutMinimum: {e}")
             return int(amount_in * 0.99)
 
-    def execute_swap(self, token_in, token_out, amount_in, recipient, fee=500):
+    def _get_fee_for_tokens(self, token_in, token_out):
+        """Look up the pool fee tier for a token pair from POOL_FEES."""
+        # Build reverse lookup: token address -> symbol
+        addr_to_symbol = {}
+        for sym, addr in TOKENS.items():
+            addr_to_symbol[addr.lower()] = sym
+        # Map WETH -> ETH for pool ID matching
+        sym_in = addr_to_symbol.get(token_in.lower(), "")
+        sym_out = addr_to_symbol.get(token_out.lower(), "")
+        if sym_in == "WETH":
+            sym_in = "ETH"
+        if sym_out == "WETH":
+            sym_out = "ETH"
+        # Try both orderings (e.g., ETH-USDC or USDC-ETH)
+        for pool_id, fee in POOL_FEES.items():
+            parts = pool_id.split("-")
+            if set(parts) == {sym_in, sym_out}:
+                return fee
+        # Default to 3000 (0.3%) if no pool found
+        logging.warning(f"No pool fee found for {token_in}/{token_out}, defaulting to 3000")
+        return 3000
+
+    def execute_swap(self, token_in, token_out, amount_in, recipient, fee=None):
         """Execute a swap via Uniswap V3 SwapRouter."""
+        if fee is None:
+            fee = self._get_fee_for_tokens(token_in, token_out)
         if self.trading_mode != "live":
             logging.info(f"[PAPER] Would swap {amount_in} of {token_in} for {token_out}")
             return {"success": True, "tx_hash": "paper"}
@@ -537,14 +617,12 @@ class EthereumExecutor:
                 token_out = usdc_addr
                 # decimals_out = usdc_decimals
 
-            # NOTE: Skip actual on‑chain execution to avoid rate limits. Return mock success.
-            logging.info("[LIVE‑SIM] Skipping on‑chain swap execution – returning mock success.")
-            if side == "BUY":
-                filled_base = amount_quote_currency / float(self.get_product_details(product_id)['price'])
-                return {"success": True, "filled_base": filled_base}
-            else:
-                filled_quote = amount_base_currency * float(self.get_product_details(product_id)['price'])
-                return {"success": True, "filled_quote": filled_quote}
+            # Look up fee tier from POOL_FEES
+            fee = POOL_FEES.get(product_id, 3000)
+
+            # Execute the on-chain swap
+            result = self.execute_swap(token_in, token_out, amount_in, self.account.address, fee=fee)
+            return result
         else:
             logging.info(f"[PAPER] On-chain swap {side} {product_id}")
             return {"success": True}

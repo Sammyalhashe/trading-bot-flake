@@ -150,6 +150,30 @@ class CoinbaseExecutor:
             return self.request("POST", "/api/v3/brokerage/orders", payload)
         return {"success": True}
 
+    def check_order_filled(self, order_id, max_attempts=5, poll_interval=2):
+        """Poll order status until filled or timeout. Returns filled price or None."""
+        for attempt in range(max_attempts):
+            data = self.request("GET", f"/api/v3/brokerage/orders/historical/{order_id}")
+            if not data or "order" not in data:
+                logging.warning(f"Could not fetch order {order_id} (attempt {attempt + 1}/{max_attempts})")
+                time.sleep(poll_interval)
+                continue
+            order = data["order"]
+            status = order.get("status", "")
+            if status == "FILLED":
+                avg_price = float(order.get("average_filled_price", 0))
+                filled_size = float(order.get("filled_size", 0))
+                logging.info(f"Order {order_id} FILLED: {filled_size} @ ${avg_price:,.2f}")
+                return avg_price
+            elif status in ("CANCELLED", "EXPIRED", "FAILED"):
+                logging.warning(f"Order {order_id} terminal status: {status}")
+                return None
+            else:
+                logging.debug(f"Order {order_id} status: {status} (attempt {attempt + 1}/{max_attempts})")
+                time.sleep(poll_interval)
+        logging.warning(f"Order {order_id} not filled after {max_attempts} attempts")
+        return None
+
     def place_market_order(self, product_id, side, amount_quote_currency=None, amount_base_currency=None):
         if self.trading_mode == "live":
             self.cancel_open_orders(product_id)

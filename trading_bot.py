@@ -24,7 +24,8 @@ from coinbase_executor import CoinbaseExecutor
 from ethereum_executor import EthereumExecutor
 
 # --- Logging Configuration ---
-LOG_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/trading.log"
+_HOME = os.path.expanduser("~")
+LOG_FILE = os.environ.get("TRADING_LOG_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "trading.log"))
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 logging.basicConfig(
@@ -37,8 +38,8 @@ logging.basicConfig(
 )
 
 # --- Configuration ---
-API_JSON_FILE = os.environ.get("COINBASE_API_JSON", "/home/salhashemi2/cdb_api_key.json")
-STATE_FILE = Path("/home/salhashemi2/trading-bot-flake/trading_state.json")
+API_JSON_FILE = os.environ.get("COINBASE_API_JSON", os.path.join(_HOME, "cdb_api_key.json"))
+STATE_FILE = Path(os.environ.get("TRADING_STATE_FILE", os.path.join(_HOME, "trading-bot-flake", "trading_state.json")))
 TRADING_MODE = os.environ.get("TRADING_MODE", "paper").lower()
 
 ENABLE_ETHEREUM = os.environ.get("ENABLE_ETHEREUM", "false").lower() == "true"
@@ -62,6 +63,13 @@ TOP_MOMENTUM_COUNT = 3
 
 # Trailing Stop-Loss
 TRAILING_STOP_PCT = float(os.environ.get("TRAILING_STOP_PCT", "0.05"))
+
+# Volume & RSI Filters
+MIN_24H_VOLUME_USD = float(os.environ.get("MIN_24H_VOLUME_USD", "100000"))
+RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "70"))
+
+# Fee-aware P&L
+ROUND_TRIP_FEE_PCT = float(os.environ.get("ROUND_TRIP_FEE_PCT", "0.006"))
 
 # Take-Profit Levels
 TAKE_PROFIT_1_PCT = float(os.environ.get("TAKE_PROFIT_1_PCT", "0.10"))
@@ -97,14 +105,19 @@ def load_state():
             state.setdefault("high_water_marks", {})
             state.setdefault("take_profit_flags", {})
             return state
-        except:
+        except Exception as e:
+            logging.error(f"Failed to load state: {e}")
             return default_state
     return default_state
 
 def save_state(state):
     try:
-        with open(STATE_FILE, 'w') as f: json.dump(state, f, indent=2)
-    except: pass
+        tmp = STATE_FILE.with_suffix('.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        logging.error(f"Failed to save state: {e}")
 
 def update_entry_price(executor_id, product_id, price):
     state = load_state()
@@ -113,7 +126,7 @@ def update_entry_price(executor_id, product_id, price):
     # Initialize high water mark to entry price
     state.setdefault("high_water_marks", {})[key] = price
     # Reset take-profit flags for new entry
-    state.setdefault("take_profit_flags", {})[key] = {"tp1_hit": False, "tp2_hit": False}
+    state.setdefault("take_profit_flags", {})[key] = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
     save_state(state)
 
 def clear_entry_price(executor_id, product_id):
@@ -180,6 +193,33 @@ def analyze_trend(df):
     l_ma = df['close'].rolling(window=LONG_WINDOW).mean().iloc[-1]
     return s_ma, l_ma
 
+def calculate_rsi(df, period=14):
+    """Calculate RSI (Relative Strength Index) from candle close prices."""
+    if df is None or len(df) < period + 1:
+        return None
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
+def calculate_atr(df, period=14):
+    """Calculate ATR (Average True Range) from candle OHLC data."""
+    if df is None or len(df) < period + 1:
+        return None
+    high = df['high']
+    low = df['low']
+    prev_close = df['close'].shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean().iloc[-1]
+    return atr
+
 def get_momentum_ranking(df):
     if df is None or len(df) < MOMENTUM_WINDOW_HOURS + 1: return 0.0
     curr = df['close'].iloc[-1]
@@ -190,20 +230,20 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
-        
+
     bal = executor.get_balances()
     cash = bal["cash"].get("USDC", 0.0)
     held = bal["crypto"]
     state = load_state()
-    
+
     # Calculate local value
     ex_value = cash
     for asset, amt in held.items():
         details = data_provider.get_product_details(get_data_product_id(asset))
         if details: ex_value += amt * float(details['price'])
-    
+
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash:,.2f}")
-    
+
     # Update peak value and check drawdown (per-executor)
     peak = load_peak_value(ex_id)
     if peak == 0.0:
@@ -214,11 +254,11 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
         save_peak_value(ex_value, ex_id)
         peak = ex_value
     drawdown_pct = ((peak - ex_value) / peak * 100) if peak > 0 else 0
-    
+
     # Drawdown guard: skip buys if drawdown exceeds limit
     if drawdown_pct >= MAX_DRAWDOWN_PCT:
         logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Pausing new buys.")
-    
+
     if reset_to_usdc:
         for asset, amount in held.items():
             if asset in ["USD", "USDC"] or is_asset_blacklisted(asset): continue
@@ -237,11 +277,26 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
             df = data_provider.get_market_data(product_id, LONG_WINDOW)
             ma_s, ma_l = analyze_trend(df)
             if ma_s and ma_l and ma_s > ma_l * 1.002 and (btc_trend == "BULL" or asset == "BTC"):
+                # Volume filter: check 24h USD volume
+                if df is not None and len(df) >= 24:
+                    volume_24h = df['volume'].iloc[-24:].sum()
+                    close_price = df['close'].iloc[-1]
+                    usd_volume_24h = volume_24h * close_price
+                    if usd_volume_24h < MIN_24H_VOLUME_USD:
+                        logging.info(f"[{ex_id}] Skipping {asset}: 24h USD volume ${usd_volume_24h:,.0f} below minimum ${MIN_24H_VOLUME_USD:,.0f}")
+                        continue
+                # RSI filter: skip overbought assets
+                rsi = calculate_rsi(df)
+                if rsi is not None:
+                    logging.info(f"[{ex_id}] {asset} RSI: {rsi:.1f}")
+                    if rsi > RSI_OVERBOUGHT:
+                        logging.info(f"[{ex_id}] Skipping {asset}: RSI {rsi:.1f} > {RSI_OVERBOUGHT} (overbought)")
+                        continue
                 asset_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
         except Exception as e: logging.error(f"[{ex_id}] Error analyzing {asset}: {e}")
-    
+
     asset_candidates.sort(key=lambda x: x["momentum"], reverse=True)
-    
+
     available_usdc = cash
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
@@ -261,10 +316,26 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
             if drawdown_pct >= MAX_DRAWDOWN_PCT:
                 continue  # Skip buys during drawdown
             if buy_size > MIN_ORDER_USD:
-                if executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size):
-                    update_entry_price(ex_id, product_id, price)
-                    available_usdc -= buy_size
-        except: pass
+                result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size)
+                if result:
+                    # Confirm fill before updating entry price
+                    order_id = None
+                    if isinstance(result, dict):
+                        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+                    if order_id and hasattr(executor, 'check_order_filled'):
+                        filled_price = executor.check_order_filled(order_id)
+                        if filled_price:
+                            update_entry_price(ex_id, product_id, filled_price)
+                            available_usdc -= buy_size
+                            logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
+                        else:
+                            logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
+                    else:
+                        # No order_id (paper mode, EthereumExecutor, etc.) — use requested price
+                        update_entry_price(ex_id, product_id, price)
+                        available_usdc -= buy_size
+        except Exception as e:
+            logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
     # Manage Sells
     for asset, amt in held.items():
@@ -274,13 +345,16 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
             price_data = data_provider.get_product_details(product_id)
             if not price_data: continue
             price = float(price_data['price'])
-            
+
             entry_key = f"{ex_id}:{product_id}"
             entry = state.get("entry_prices", {}).get(entry_key)
-            
+
             if not entry:
                 continue
-            
+
+            # --- Fetch candle data once for trailing stop ATR and trend exit ---
+            df = data_provider.get_market_data(product_id, LONG_WINDOW)
+
             # --- Update high water mark ---
             hwm = state.get("high_water_marks", {}).get(entry_key, entry)
             if price > hwm:
@@ -288,14 +362,14 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 state.setdefault("high_water_marks", {})[entry_key] = hwm
                 save_state(state)
                 logging.info(f"[{ex_id}] New high water mark for {asset}: ${hwm:,.2f}")
-            
+
             # --- Get take-profit flags ---
-            tp_flags = state.get("take_profit_flags", {}).get(entry_key, {"tp1_hit": False, "tp2_hit": False})
-            
+            tp_flags = state.get("take_profit_flags", {}).get(entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False})
+
             sell_trigger = False
             sell_ratio = 1.0
             reason = ""
-            
+
             # Priority 1: Take-Profit Level 2 (higher gain threshold)
             if not tp_flags.get("tp2_hit", False) and price >= entry * (1 + TAKE_PROFIT_2_PCT):
                 sell_trigger = True
@@ -306,7 +380,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 tp_flags["tp1_hit"] = True
                 state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
                 save_state(state)
-            
+
             # Priority 2: Take-Profit Level 1 (lower gain threshold)
             elif not tp_flags.get("tp1_hit", False) and price >= entry * (1 + TAKE_PROFIT_1_PCT):
                 sell_trigger = True
@@ -315,33 +389,59 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 tp_flags["tp1_hit"] = True
                 state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
                 save_state(state)
-            
-            # Priority 3: Trailing Stop-Loss
-            elif price < hwm * (1 - TRAILING_STOP_PCT):
-                sell_trigger = True
-                sell_ratio = 1.0
-                reason = f"Trailing stop-loss triggered for {asset} (price ${price:,.2f} < high water mark ${hwm:,.2f} * {1 - TRAILING_STOP_PCT:.2f})"
-            
-            # Priority 4: Trend-exit (MA cross) — fallback
-            if not sell_trigger:
-                df = data_provider.get_market_data(product_id, LONG_WINDOW)
+
+            # Priority 3: Trailing Stop-Loss (ATR-based dynamic stop)
+            elif True:
+                # Calculate dynamic trailing stop from ATR
+                atr = calculate_atr(df)
+                if atr is not None and price > 0:
+                    atr_stop = 2 * atr / price
+                    atr_stop = max(0.02, min(0.15, atr_stop))  # Floor 2%, cap 15%
+                    effective_trailing_stop = atr_stop
+                else:
+                    effective_trailing_stop = TRAILING_STOP_PCT  # Fallback to flat
+                if price < hwm * (1 - effective_trailing_stop):
+                    sell_trigger = True
+                    sell_ratio = 1.0
+                    reason = f"Trailing stop-loss triggered for {asset} (price ${price:,.2f} < high water mark ${hwm:,.2f} * {1 - effective_trailing_stop:.2f}, stop={effective_trailing_stop*100:.1f}%)"
+
+            # Priority 4: Trend-exit (MA cross) — fallback (only fires once per entry)
+            if not sell_trigger and not tp_flags.get("trend_exit_hit", False):
                 ma_s, ma_l = analyze_trend(df)
                 if ma_s and ma_l and ma_s < ma_l * 0.998:
                     sell_trigger = True
                     sell_ratio = 0.5
                     reason = f"Trend-exit (50%) triggered for {asset}"
-            
+                    tp_flags["trend_exit_hit"] = True
+                    state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
+                    save_state(state)
+
             if sell_trigger:
                 logging.info(f"[{ex_id}] 🚨 {reason}")
                 sell_amount = amt * sell_ratio
-                if executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount):
-                    logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${price:,.2f}")
-                    # Track PnL
+                result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+                if result:
+                    # Confirm fill and get actual exit price
+                    exit_price = price  # default to requested price
+                    order_id = None
+                    if isinstance(result, dict):
+                        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+                    if order_id and hasattr(executor, 'check_order_filled'):
+                        filled_price = executor.check_order_filled(order_id)
+                        if filled_price:
+                            exit_price = filled_price
+                            logging.info(f"[{ex_id}] Sell {asset} confirmed at ${filled_price:,.2f}")
+                        else:
+                            logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
+
+                    logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
+                    # Track PnL (fee-aware)
                     if entry:
-                        pnl = (price - entry) * sell_amount
+                        fee_cost = entry * sell_amount * ROUND_TRIP_FEE_PCT
+                        pnl = (exit_price - entry) * sell_amount - fee_cost
                         is_win = pnl > 0
                         record_trade(is_win, pnl)
-                        logging.info(f"[{ex_id}] 📊 PnL: ${pnl:+.2f} (entry=${entry:,.2f} -> exit=${price:,.2f})")
+                        logging.info(f"[{ex_id}] 📊 PnL: ${pnl:+.2f} (entry=${entry:,.2f} -> exit=${exit_price:,.2f}, fees=${fee_cost:.2f})")
                     if sell_ratio == 1.0:
                         clear_entry_price(ex_id, product_id)
                     else:
@@ -349,33 +449,33 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                         pass
         except Exception as e:
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
-        
+
     return ex_value
 
 def run_bot(reset_to_usdc=False):
     cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
     active_executors = [cb_executor]
-    
+
     if ENABLE_ETHEREUM:
         # Prioritise BASE_RPC_URL for Base network
         rpc_url = os.environ.get("BASE_RPC_URL") or os.environ.get("ETH_RPC_URL")
         private_key = os.environ.get("ETH_PRIVATE_KEY")
-        
+
         # If not in env, check secrets
         if not rpc_url:
             for path in ["/run/secrets/base_rpc_url", "/run/secrets/eth_rpc_url"]:
                 if os.path.exists(path):
                     with open(path, 'r') as f: rpc_url = f.read().strip(); break
-        
+
         # Absolute fallback to Base Mainnet if still not set or if it's pointing to something invalid
         if not rpc_url or "gashawk" in rpc_url:
             rpc_url = "https://mainnet.base.org"
-            
+
         if not private_key:
             for path in ["/run/secrets/eth_private_key"]:
                 if os.path.exists(path):
                     with open(path, 'r') as f: private_key = f.read().strip(); break
-        
+
         if rpc_url and private_key:
             try:
                 active_executors.append(EthereumExecutor(rpc_url, private_key, TRADING_MODE))
@@ -386,7 +486,7 @@ def run_bot(reset_to_usdc=False):
     logging.info(f"[Risk] portfolio_risk={PORTFOLIO_RISK_PERCENTAGE*100:.0f}% | risk_per_trade={RISK_PER_TRADE_PCT*100:.0f}%")
     logging.info(f"Trailing Stop: {TRAILING_STOP_PCT*100:.1f}% | TP1: {TAKE_PROFIT_1_PCT*100:.1f}% ({TAKE_PROFIT_1_SELL_RATIO*100:.0f}% sell) | TP2: {TAKE_PROFIT_2_PCT*100:.1f}% ({TAKE_PROFIT_2_SELL_RATIO*100:.0f}% sell)")
     data_provider = cb_executor
-    
+
     # Global Trend
     btc_df = data_provider.get_market_data(get_data_product_id("BTC"), LONG_WINDOW)
     btc_s, btc_l = analyze_trend(btc_df)
@@ -401,7 +501,7 @@ def run_bot(reset_to_usdc=False):
             logging.error(f"Strategy failed for {ex.__class__.__name__}: {e}")
 
     logging.info(f"--- Aggregate Portfolio Total: ${aggregate_value:,.2f} ---")
-    
+
     # Run summary
     increment_run_count()
     log_performance_summary()

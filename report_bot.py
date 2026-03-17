@@ -10,9 +10,10 @@ import urllib.parse
 from datetime import datetime, timedelta
 from cryptography.hazmat.primitives import serialization
 
-LOG_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/trading.log"
-API_JSON_FILE = "/home/salhashemi2/cdb_api_key.json"
-REPORT_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/report.txt"
+_HOME = os.path.expanduser("~")
+LOG_FILE = os.environ.get("TRADING_LOG_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "trading.log"))
+API_JSON_FILE = os.environ.get("COINBASE_API_JSON", os.path.join(_HOME, "cdb_api_key.json"))
+REPORT_FILE = os.environ.get("TRADING_REPORT_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "report.txt"))
 
 def get_credentials():
     with open(API_JSON_FILE, 'r') as f: data = json.load(f)

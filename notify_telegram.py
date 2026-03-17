@@ -6,11 +6,12 @@ import sys
 from datetime import datetime
 
 # --- Configuration ---
-REPORT_FILE = "/home/salhashemi2/.openclaw/workspace/trading-bot/report.txt"
+_HOME = os.path.expanduser("~")
+REPORT_FILE = os.environ.get("TRADING_REPORT_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "report.txt"))
 TELEGRAM_TOKEN_FILE = "/run/secrets/telegram_bot_token"
 CHAT_ID = "8555669756"
 # File to persist market regime change counters and recent transactions
-MARKET_STATE_FILE = "/home/salhashemi2/trading-bot-flake/market_state.json"
+MARKET_STATE_FILE = os.environ.get("MARKET_STATE_FILE", os.path.join(_HOME, "trading-bot-flake", "market_state.json"))
 
 # Emoji definitions
 REGIME_CHANGE_EMOJI = "🔄"  # blue arrow cycle for market flips
