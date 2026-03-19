@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 import signal
+import fcntl
 from pathlib import Path
 from decimal import Decimal
 
@@ -97,24 +98,75 @@ def round_to_increment(amount, increment):
     amt = Decimal(str(amount))
     return (amt // inc) * inc
 
+# --- Process-level lock (prevents overlapping runs from systemd timer) ---
+_RUN_LOCK_FILE = STATE_FILE.with_suffix('.runlock')
+_run_lock_fd = None
+
+def acquire_run_lock():
+    """Acquire exclusive process-level lock. Returns True if acquired, False if another instance is running."""
+    global _run_lock_fd
+    os.makedirs(os.path.dirname(_RUN_LOCK_FILE), exist_ok=True)
+    _run_lock_fd = open(_RUN_LOCK_FILE, 'w')
+    try:
+        fcntl.flock(_run_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _run_lock_fd.write(str(os.getpid()))
+        _run_lock_fd.flush()
+        return True
+    except (IOError, OSError):
+        _run_lock_fd.close()
+        _run_lock_fd = None
+        return False
+
+def release_run_lock():
+    """Release process-level lock."""
+    global _run_lock_fd
+    if _run_lock_fd:
+        try:
+            fcntl.flock(_run_lock_fd, fcntl.LOCK_UN)
+            _run_lock_fd.close()
+        except Exception:
+            pass
+        _run_lock_fd = None
+
 # --- State Management ---
+_STATE_LOCK_FILE = STATE_FILE.with_suffix('.lock')
+
+def _acquire_state_lock():
+    """Acquire file lock for state access. Returns lock file handle."""
+    os.makedirs(os.path.dirname(_STATE_LOCK_FILE), exist_ok=True)
+    lock_fd = open(_STATE_LOCK_FILE, 'w')
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    return lock_fd
+
+def _release_state_lock(lock_fd):
+    """Release file lock for state access."""
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+    except Exception:
+        pass
+
 def load_state():
     default_state = {"entry_prices": {}, "high_water_marks": {}, "take_profit_flags": {}}
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, 'r') as f:
-                state = json.load(f)
-            # Ensure new keys exist for backward compatibility
-            state.setdefault("entry_prices", {})
-            state.setdefault("high_water_marks", {})
-            state.setdefault("take_profit_flags", {})
-            return state
-        except Exception as e:
-            logging.error(f"Failed to load state: {e}")
-            return default_state
-    return default_state
+    lock_fd = _acquire_state_lock()
+    try:
+        if STATE_FILE.exists():
+            try:
+                with open(STATE_FILE, 'r') as f:
+                    state = json.load(f)
+                state.setdefault("entry_prices", {})
+                state.setdefault("high_water_marks", {})
+                state.setdefault("take_profit_flags", {})
+                return state
+            except Exception as e:
+                logging.error(f"Failed to load state: {e}")
+                return default_state
+        return default_state
+    finally:
+        _release_state_lock(lock_fd)
 
 def save_state(state):
+    lock_fd = _acquire_state_lock()
     try:
         tmp = STATE_FILE.with_suffix('.tmp')
         with open(tmp, 'w') as f:
@@ -122,6 +174,8 @@ def save_state(state):
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         logging.error(f"Failed to save state: {e}")
+    finally:
+        _release_state_lock(lock_fd)
 
 def update_entry_price(executor_id, product_id, price):
     state = load_state()
@@ -349,19 +403,28 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                     # Confirm fill before updating entry price
                     order_id = None
                     if isinstance(result, dict):
-                        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
-                    if order_id and hasattr(executor, 'check_order_filled'):
-                        filled_price = executor.check_order_filled(order_id)
-                        if filled_price:
-                            update_entry_price(ex_id, product_id, filled_price)
+                        # Check if on-chain swap was confirmed via receipt
+                        if result.get("confirmed"):
+                            update_entry_price(ex_id, product_id, price)
                             available_usdc -= buy_size
-                            logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
+                            logging.info(f"[{ex_id}] Buy {asset} confirmed on-chain at ${price:,.2f}")
+                        elif result.get("success") is False:
+                            logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
                         else:
-                            logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
-                    else:
-                        # No order_id (paper mode, EthereumExecutor, etc.) — use requested price
-                        update_entry_price(ex_id, product_id, price)
-                        available_usdc -= buy_size
+                            # Coinbase path: check order_id for fill confirmation
+                            order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+                            if order_id and hasattr(executor, 'check_order_filled'):
+                                filled_price = executor.check_order_filled(order_id)
+                                if filled_price:
+                                    update_entry_price(ex_id, product_id, filled_price)
+                                    available_usdc -= buy_size
+                                    logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
+                                else:
+                                    logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
+                            else:
+                                # Paper mode — use requested price
+                                update_entry_price(ex_id, product_id, price)
+                                available_usdc -= buy_size
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
@@ -475,16 +538,20 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 if result:
                     # Confirm fill and get actual exit price
                     exit_price = price  # default to requested price
-                    order_id = None
-                    if isinstance(result, dict):
+                    if isinstance(result, dict) and result.get("success") is False:
+                        logging.warning(f"[{ex_id}] Sell {asset} failed: {result.get('error', 'unknown')}")
+                        continue
+                    if isinstance(result, dict) and result.get("confirmed"):
+                        logging.info(f"[{ex_id}] Sell {asset} confirmed on-chain at ${price:,.2f}")
+                    elif isinstance(result, dict):
                         order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
-                    if order_id and hasattr(executor, 'check_order_filled'):
-                        filled_price = executor.check_order_filled(order_id)
-                        if filled_price:
-                            exit_price = filled_price
-                            logging.info(f"[{ex_id}] Sell {asset} confirmed at ${filled_price:,.2f}")
-                        else:
-                            logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
+                        if order_id and hasattr(executor, 'check_order_filled'):
+                            filled_price = executor.check_order_filled(order_id)
+                            if filled_price:
+                                exit_price = filled_price
+                                logging.info(f"[{ex_id}] Sell {asset} confirmed at ${filled_price:,.2f}")
+                            else:
+                                logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
 
                     logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
                     # Track PnL (fee-aware)
@@ -502,9 +569,77 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
         except Exception as e:
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
 
+    # Manage Short Position Closes (buy-back when trend reverses or stop hit)
+    if ENABLE_SHORT:
+        short_entries = {k: v for k, v in state.get("entry_prices", {}).items()
+                        if k.startswith(f"{ex_id}:") and k.endswith(":SHORT")}
+        for short_key, short_entry in short_entries.items():
+            # Extract product_id from key format "{ex_id}:{product_id}:SHORT"
+            parts = short_key.split(":")
+            if len(parts) < 3:
+                continue
+            product_id = parts[1]
+            asset = product_id.split("-")[0]
+            try:
+                price_data = data_provider.get_product_details(product_id)
+                if not price_data:
+                    continue
+                price = float(price_data['price'])
+
+                df = data_provider.get_market_data(product_id, LONG_WINDOW)
+                close_short = False
+                reason = ""
+
+                # Close short if trend reverses to bullish
+                ma_s, ma_l = analyze_trend(df)
+                if ma_s and ma_l and ma_s > ma_l * 1.002:
+                    close_short = True
+                    reason = f"Short close: trend reversed bullish for {asset}"
+
+                # Close short on trailing stop (price rose too much from entry)
+                elif price > short_entry * (1 + TRAILING_STOP_PCT):
+                    close_short = True
+                    reason = f"Short stop-loss: {asset} price ${price:,.2f} > entry ${short_entry:,.2f} * {1 + TRAILING_STOP_PCT:.2f}"
+
+                # Close short on take-profit (price dropped enough)
+                elif price <= short_entry * (1 - TAKE_PROFIT_1_PCT):
+                    close_short = True
+                    reason = f"Short take-profit: {asset} price ${price:,.2f} dropped to target"
+
+                if close_short:
+                    logging.info(f"[{ex_id}] 🚨 {reason}")
+                    # Buy back to close the short — use the original short size
+                    # We don't track short quantity separately, so we close the full position
+                    short_value = short_entry  # approximate — this is USD-denominated entry
+                    result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=short_value)
+                    if result:
+                        if isinstance(result, dict) and result.get("success") is False:
+                            logging.warning(f"[{ex_id}] Short close for {asset} failed: {result.get('error')}")
+                        else:
+                            # Short PnL is inverted: profit when price drops
+                            pnl = (short_entry - price) * (short_value / short_entry) - short_entry * (short_value / short_entry) * ROUND_TRIP_FEE_PCT
+                            is_win = pnl > 0
+                            record_trade(is_win, pnl)
+                            logging.info(f"[{ex_id}] 📊 Short PnL: ${pnl:+.2f} (entry=${short_entry:,.2f} -> exit=${price:,.2f})")
+                            # Clear the short entry
+                            if short_key in state.get("entry_prices", {}):
+                                del state["entry_prices"][short_key]
+                                save_state(state)
+            except Exception as e:
+                logging.error(f"[{ex_id}] Error managing short close for {asset}: {e}")
+
     return ex_value
 
 def run_bot(reset_to_usdc=False):
+    if not acquire_run_lock():
+        logging.warning("Another bot instance is already running, exiting.")
+        return
+    try:
+        _run_bot(reset_to_usdc)
+    finally:
+        release_run_lock()
+
+def _run_bot(reset_to_usdc=False):
     cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
     active_executors = [cb_executor]
 

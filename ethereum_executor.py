@@ -1,9 +1,6 @@
 import logging
 import time
 import os
-import logging
-#
-import os
 from web3 import Web3
 from decimal import Decimal
 import requests
@@ -98,6 +95,8 @@ POOL_FEES = {
 
 # Slippage tolerance (0.5%)
 SLIPPAGE_BPS = 50  # 0.5%
+# Minimum ETH balance required for gas (in ETH)
+MIN_GAS_ETH = float(os.environ.get("MIN_GAS_ETH", "0.001"))
 # Transaction deadline (seconds from now)
 TX_DEADLINE_SECONDS = 120
 
@@ -158,7 +157,7 @@ class EthereumExecutor:
         self._allowance_cache = {}
         self._gas_price_cache = None
         self._gas_price_cache_time = 0
-        self._nonce_cache = None
+        self._next_nonce = None  # Local nonce tracker to avoid RPC race conditions
 
         # Initialize Web3 with primary RPC
         self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 30}))
@@ -265,10 +264,19 @@ class EthereumExecutor:
             return self._gas_price_cache or 1000000000  # 1 gwei fallback
 
     def _get_nonce(self):
-        """Get nonce for the account."""
+        """Get nonce for the account. Uses local tracker if set, otherwise fetches from RPC."""
+        if self._next_nonce is not None:
+            nonce = self._next_nonce
+            self._next_nonce = None  # Consume it — next call fetches from RPC
+            return nonce
         def _fetch_nonce():
             return self.w3.eth.get_transaction_count(self.account.address)
         return retry_rpc_call(_fetch_nonce)
+
+    def _invalidate_gas_cache(self):
+        """Force fresh gas price on next call."""
+        self._gas_price_cache = None
+        self._gas_price_cache_time = 0
 
     def _check_balance(self, balances, symbol, address):
         """Helper to fetch and add ERC20 balance if non-zero. Uses cached decimals."""
@@ -453,15 +461,12 @@ class EthereumExecutor:
                     except Exception as e:
                         if "in-flight" in str(e).lower():
                             logging.warning("In-flight transaction limit reached during reset, waiting 10s...")
-                            #
                             time.sleep(10)
                             return self.w3.eth.send_raw_transaction(signed_tx0.raw_transaction)
                         raise
 
                 tx_hash0 = retry_rpc_call(_send_reset)
                 retry_rpc_call(lambda: self.w3.eth.wait_for_transaction_receipt(tx_hash0, timeout=120))
-                #
-                time.sleep(2) # Extra buffer for delegated accounts
                 base_nonce += 1
 
             # Then approve max with sequential nonce
@@ -484,7 +489,6 @@ class EthereumExecutor:
                 except Exception as e:
                     if "in-flight" in str(e).lower():
                         logging.warning("In-flight transaction limit reached during MAX approval, waiting 10s...")
-                        #
                         time.sleep(10)
                         return self.w3.eth.send_raw_transaction(signed_tx_max.raw_transaction)
                     raise
@@ -495,8 +499,8 @@ class EthereumExecutor:
             if receipt_max.status == 1:
                 logging.info(f"Approved MAX for {token_address}. Tx: {tx_hash_max.hex()}")
                 self._allowance_cache[cache_key] = 2**256 - 1
-                #
-                time.sleep(5)  # Wait for RPC to update nonce
+                # Set local nonce so execute_swap doesn't need to fetch from RPC
+                self._next_nonce = base_nonce + 1
                 return tx_hash_max.hex()
             else:
                 logging.error(f"Approve MAX transaction failed: {receipt_max}")
@@ -591,6 +595,16 @@ class EthereumExecutor:
             return {"success": True, "tx_hash": "paper"}
 
         try:
+            # Pre-flight: check minimum gas balance
+            try:
+                eth_bal = self.w3.eth.get_balance(self.account.address)
+                eth_balance = float(self.w3.from_wei(eth_bal, 'ether'))
+                if eth_balance < MIN_GAS_ETH:
+                    logging.error(f"Insufficient ETH for gas: {eth_balance:.6f} ETH < {MIN_GAS_ETH} ETH minimum")
+                    return {"success": False, "error": "insufficient gas"}
+            except Exception as e:
+                logging.warning(f"Could not check gas balance: {e}, proceeding anyway")
+
             # Approve token_in and verify it succeeded
             approval_result = self._approve_token(token_in, amount_in)
             if approval_result is None:
@@ -637,19 +651,19 @@ class EthereumExecutor:
                             error_msg = str(e).lower()
                             if "in-flight" in error_msg:
                                 logging.warning("In-flight transaction limit reached during swap, waiting 10s...")
-                                #
                                 time.sleep(10)
                                 return self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                             raise
 
                     tx_hash = retry_rpc_call(_send_swap)
-                    break # Success!
+                    break
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "underpriced" in error_msg or "nonce" in error_msg:
-                        logging.warning(f"Nonce/underpriced error (attempt {attempt+1}), waiting 5s...: {e}")
-                        #
-                        time.sleep(5)
+                        logging.warning(f"Nonce/underpriced error (attempt {attempt+1}), retrying: {e}")
+                        if "underpriced" in error_msg:
+                            self._invalidate_gas_cache()
+                        time.sleep(2)
                         continue
                     raise
 
@@ -663,7 +677,7 @@ class EthereumExecutor:
 
             if receipt.status == 1:
                 logging.info(f"Swap successful. Tx: {tx_hash.hex()}")
-                return {"success": True, "tx_hash": tx_hash.hex()}
+                return {"success": True, "confirmed": True, "tx_hash": tx_hash.hex()}
             else:
                 logging.error(f"Swap transaction failed: {receipt}")
                 return {"success": False, "error": "transaction failed"}
