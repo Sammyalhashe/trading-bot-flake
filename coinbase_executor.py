@@ -104,9 +104,15 @@ class CoinbaseExecutor:
         return None, None
 
     def _round_to_increment(self, amount, increment):
-        inc = Decimal(str(increment))
-        amt = Decimal(str(amount))
-        return (amt // inc) * inc
+        try:
+            if not amount or not increment:
+                return amount
+            inc = Decimal(str(increment))
+            amt = Decimal(str(amount))
+            return (amt // inc) * inc
+        except Exception as e:
+            logging.error(f"Rounding error: {e} (amt={amount}, inc={increment})")
+            return amount
 
     def place_limit_order(self, product_id, side, price, amount_quote_currency=None, amount_base_currency=None):
         if self.trading_mode == "live":
@@ -124,10 +130,14 @@ class CoinbaseExecutor:
             price = max(price, best_bid + tick if best_bid else price)
 
         order_id = str(uuid.uuid4())
-        if side == 'BUY' and amount_quote_currency:
+        if amount_quote_currency:
             base_size = float(amount_quote_currency) / float(price)
         else:
             base_size = amount_base_currency
+
+        if base_size is None:
+            logging.error(f"Cannot place order for {product_id}: neither amount_quote_currency nor amount_base_currency provided.")
+            return None
 
         rounded_base = self._round_to_increment(base_size, details['base_increment'])
         rounded_price = self._round_to_increment(price, details['quote_increment'])
@@ -145,10 +155,10 @@ class CoinbaseExecutor:
             }
         }
         
-        logging.info(f"Placing LIMIT {side} (Post-Only) for {product_id} at {rounded_price}")
+        logging.info(f"Placing LIMIT {side} (Post-Only) for {product_id} at {rounded_price} size={rounded_base}")
         if self.trading_mode == "live":
             return self.request("POST", "/api/v3/brokerage/orders", payload)
-        return {"success": True}
+        return {"success": True, "order_id": order_id}
 
     def check_order_filled(self, order_id, max_attempts=5, poll_interval=2):
         """Poll order status until filled or timeout. Returns filled price or None."""
@@ -182,25 +192,31 @@ class CoinbaseExecutor:
         if not details: return None
         order_id = str(uuid.uuid4())
         
-        if side == 'BUY' and amount_quote_currency:
-            base_size = float(amount_quote_currency) / float(details['price'])
+        if amount_quote_currency:
+            base_size = float(amount_quote_currency) / float(details.get('price', 1))
         else:
             base_size = amount_base_currency
 
-        rounded_base = self._round_to_increment(base_size, details['base_increment'])
+        if base_size is None and not (side == 'BUY' and amount_quote_currency):
+            logging.error(f"Cannot place market order for {product_id}: neither amount_quote_currency nor amount_base_currency provided.")
+            return None
+
         payload = {
             "client_order_id": order_id, 
             "product_id": product_id, 
             "side": side, 
             "order_configuration": {
-                "market_market_ioc": {
-                    "quote_size": str(amount_quote_currency) if amount_quote_currency else "",
-                    "base_size": str(rounded_base)
-                }
+                "market_market_ioc": {}
             }
         }
+
+        if side == 'BUY' and amount_quote_currency:
+            payload["order_configuration"]["market_market_ioc"]["quote_size"] = str(amount_quote_currency)
+        else:
+            rounded_base = self._round_to_increment(base_size, details['base_increment'])
+            payload["order_configuration"]["market_market_ioc"]["base_size"] = str(rounded_base)
         
         logging.info(f"Placing MARKET {side} (IOC) for {product_id}")
         if self.trading_mode == "live":
             return self.request("POST", "/api/v3/brokerage/orders", payload)
-        return {"success": True}
+        return {"success": True, "order_id": order_id}

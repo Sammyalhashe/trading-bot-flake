@@ -46,10 +46,14 @@ ENABLE_ETHEREUM = os.environ.get("ENABLE_ETHEREUM", "false").lower() == "true"
 ETH_RPC_URL = os.environ.get("ETH_RPC_URL")
 ETH_PRIVATE_KEY = os.environ.get("ETH_PRIVATE_KEY")
 
+# Enable/disable short selling
+ENABLE_SHORT = os.environ.get("ENABLE_SHORT", "true").lower() == "true"
+
 # Strategy & Risk
 SHORT_WINDOW = 20
 LONG_WINDOW = 50
 PORTFOLIO_RISK_PERCENTAGE = float(os.environ.get("PORTFOLIO_RISK_PERCENTAGE", "0.15"))
+SHORT_RISK_PERCENTAGE = float(os.environ.get("SHORT_RISK_PERCENTAGE", "0.05"))  # 5% for shorts
 RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "0.95"))
 STOP_LOSS_PCT = 0.05  # Kept for backward compatibility reference
 
@@ -268,6 +272,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
 
     # Scan for buys
     trade_limit = ex_value * PORTFOLIO_RISK_PERCENTAGE
+    short_limit = ex_value * SHORT_RISK_PERCENTAGE
     asset_candidates = []
     # Major assets supported
     for asset in ["BTC", "ETH", "MATIC"]:
@@ -295,9 +300,32 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 asset_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
         except Exception as e: logging.error(f"[{ex_id}] Error analyzing {asset}: {e}")
 
+    # Short candidates in BEAR market (momentum is inverted for shorts)
+    short_candidates = []
+    if btc_trend == "BEAR":
+        for asset in ["BTC", "ETH", "MATIC"]:
+            if is_asset_blacklisted(asset): continue
+            product_id = get_data_product_id(asset)
+            try:
+                df = data_provider.get_market_data(product_id, LONG_WINDOW)
+                ma_s, ma_l = analyze_trend(df)
+                if ma_s and ma_l and ma_s < ma_l * 0.998:  # Downtrend
+                    # Volume filter
+                    if df is not None and len(df) >= 24:
+                        volume_24h = df['volume'].iloc[-24:].sum()
+                        close_price = df['close'].iloc[-1]
+                        usd_volume_24h = volume_24h * close_price
+                        if usd_volume_24h < MIN_24H_VOLUME_USD:
+                            continue
+                    short_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
+            except Exception as e: logging.error(f"[{ex_id}] Error analyzing short {asset}: {e}")
+
+        short_candidates.sort(key=lambda x: x["momentum"])  # Most negative momentum first
+
     asset_candidates.sort(key=lambda x: x["momentum"], reverse=True)
 
     available_usdc = cash
+    available_short_usdc = cash  # Separate pool for short positions
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
         try:
@@ -313,8 +341,8 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                     logging.info(f"[{ex_id}] Skipping {asset}: position at ${current_asset_value:,.0f} already at/exceeds MAX_POSITION_USD (${MAX_POSITION_USD:,.0f})")
                     continue
                 logging.info(f"[{ex_id}] Capped {asset} buy to ${buy_size:,.2f} to stay within MAX_POSITION_USD")
-            if drawdown_pct >= MAX_DRAWDOWN_PCT:
-                continue  # Skip buys during drawdown
+            if drawdown_pct >= MAX_DRAWDOWN_PCT and btc_trend == "BULL":
+                continue  # Skip long buys during drawdown
             if buy_size > MIN_ORDER_USD:
                 result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size)
                 if result:
@@ -336,6 +364,30 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                         available_usdc -= buy_size
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
+
+    # Short selling in BEAR market (5% of portfolio limit)
+    if ENABLE_SHORT:
+        for candidate in short_candidates[:TOP_MOMENTUM_COUNT]:
+            asset, product_id = candidate["asset"], candidate["product_id"]
+            try:
+                price_data = data_provider.get_product_details(product_id)
+                price = float(price_data['price'])
+                short_size = min(available_short_usdc * SHORT_RISK_PERCENTAGE, short_limit)
+                if short_size < MIN_ORDER_USD:
+                    logging.info(f"[{ex_id}] Skipping short {asset}: size ${short_size:,.2f} below minimum ${MIN_ORDER_USD:.0f}")
+                    continue
+                # Execute short sell (SELL order opens short position)
+                result = executor.place_limit_order(product_id, 'SELL', price, amount_quote_currency=short_size)
+                if result:
+                    # Record entry price for short position (inverted for PnL)
+                    entry_key = f"{ex_id}:{product_id}:SHORT"
+                    state.setdefault("entry_prices", {})[entry_key] = price
+                    available_short_usdc -= short_size
+                    logging.info(f"[{ex_id}] Short {asset} at ${price:,.2f} (size: ${short_size:,.2f})")
+            except Exception as e:
+                logging.error(f"[{ex_id}] Error evaluating short {asset}: {e}")
+    else:
+        logging.info(f"[{ex_id}] Short selling disabled via ENABLE_SHORT=False")
 
     # Manage Sells
     for asset, amt in held.items():

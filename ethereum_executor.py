@@ -375,17 +375,27 @@ class EthereumExecutor:
         return None
 
     def _approve_token(self, token_address, amount):
-        """Approve router to spend tokens. Skips if already approved (cached)."""
+        """Approve router to spend tokens. Skips if already approved (cached).
+        
+        Uses max uint256 for approval to avoid repeated approvals across different amounts.
+        Cache persists across runs to minimize RPC calls.
+        """
         if self.trading_mode != "live" or not self.account:
             return None
 
         addr_lower = token_address.lower()
         cache_key = f"{addr_lower}:{self.account.address}"
 
-        # Check cached allowance first
-        if cache_key in self._allowance_cache and self._allowance_cache[cache_key] >= amount:
-            logging.info(f"Using cached allowance for {token_address}: {self._allowance_cache[cache_key]}")
-            return None
+        # Check cached allowance first (max uint256 means fully approved)
+        if cache_key in self._allowance_cache:
+            cached_allowance = self._allowance_cache[cache_key]
+            if cached_allowance == 2**256 - 1:
+                logging.info(f"Using cached MAX approval for {token_address}")
+                return None
+            # If cached but not max, check if it's sufficient for this amount
+            if cached_allowance >= amount:
+                logging.info(f"Using cached allowance for {token_address}: {cached_allowance}")
+                return None
 
         try:
             token_contract = self.w3.eth.contract(
@@ -404,13 +414,22 @@ class EthereumExecutor:
             self._allowance_cache[cache_key] = allowance
             logging.info(f"Current allowance for {token_address} on router: {allowance}")
 
-            if allowance >= amount:
-                return None  # Already approved
+            # If already max approved, cache and return
+            if allowance == 2**256 - 1:
+                self._allowance_cache[cache_key] = 2**256 - 1
+                return None
 
-            # Build approve transaction
-            tx = token_contract.functions.approve(
+            # Check if current allowance is sufficient
+            if allowance >= amount:
+                # Cache this allowance for future checks
+                self._allowance_cache[cache_key] = allowance
+                return None
+
+            # Approve max uint256 to avoid future approvals for this token
+            # First, set allowance to 0 then to max (standard pattern for some tokens)
+            tx0 = token_contract.functions.approve(
                 Web3.to_checksum_address(SWAP_ROUTER_ADDRESS),
-                amount
+                0
             ).build_transaction({
                 'from': self.account.address,
                 'nonce': self._get_nonce(),
@@ -418,26 +437,31 @@ class EthereumExecutor:
                 'gasPrice': self._get_gas_price(),
                 'chainId': EXPECTED_CHAIN_ID,
             })
+            signed_tx0 = self.w3.eth.account.sign_transaction(tx0, self.private_key)
+            tx_hash0 = retry_rpc_call(lambda: self.w3.eth.send_raw_transaction(signed_tx0.raw_transaction))
+            retry_rpc_call(lambda: self.w3.eth.wait_for_transaction_receipt(tx_hash0, timeout=120))
+            
+            # Then approve max
+            tx_max = token_contract.functions.approve(
+                Web3.to_checksum_address(SWAP_ROUTER_ADDRESS),
+                2**256 - 1
+            ).build_transaction({
+                'from': self.account.address,
+                'nonce': self._get_nonce() + 1,  # Next nonce
+                'gas': 100000,
+                'gasPrice': self._get_gas_price(),
+                'chainId': EXPECTED_CHAIN_ID,
+            })
+            signed_tx_max = self.w3.eth.account.sign_transaction(tx_max, self.private_key)
+            tx_hash_max = retry_rpc_call(lambda: self.w3.eth.send_raw_transaction(signed_tx_max.raw_transaction))
+            receipt_max = retry_rpc_call(lambda: self.w3.eth.wait_for_transaction_receipt(tx_hash_max, timeout=120))
 
-            signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
-
-            def _send_tx():
-                return self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-
-            tx_hash = retry_rpc_call(_send_tx)
-
-            def _wait_receipt():
-                return self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-
-            receipt = retry_rpc_call(_wait_receipt)
-
-            if receipt.status == 1:
-                logging.info(f"Approved {token_address} for router. Tx: {tx_hash.hex()}")
-                # Update cache
-                self._allowance_cache[cache_key] = 2**256 - 1  # Max uint256
-                return tx_hash.hex()
+            if receipt_max.status == 1:
+                logging.info(f"Approved MAX for {token_address}. Tx: {tx_hash_max.hex()}")
+                self._allowance_cache[cache_key] = 2**256 - 1
+                return tx_hash_max.hex()
             else:
-                logging.error(f"Approve transaction failed: {receipt}")
+                logging.error(f"Approve MAX transaction failed: {receipt_max}")
                 return None
         except Exception as e:
             logging.error(f"Approve failed: {e}")
@@ -607,15 +631,20 @@ class EthereumExecutor:
                 amount_in = int(amount_quote_currency * (10 ** usdc_decimals))
                 token_in = usdc_addr
                 token_out = token_addr
-                # decimals_out = token_decimals  # not used
             else:  # SELL
+                if not amount_base_currency and amount_quote_currency:
+                    # Calculate amount_base_currency from amount_quote_currency using current price
+                    details = self.get_product_details(product_id)
+                    if details and 'price' in details:
+                        amount_base_currency = float(amount_quote_currency) / float(details['price'])
+                        logging.info(f"EthereumExecutor: Calculated sell amount_base_currency={amount_base_currency} from quote={amount_quote_currency} @ price={details['price']}")
+                
                 if not amount_base_currency:
-                    logging.error("SELL requires amount_base_currency")
+                    logging.error("SELL requires amount_base_currency or amount_quote_currency (with price)")
                     return None
                 amount_in = int(amount_base_currency * (10 ** token_decimals))
                 token_in = token_addr
                 token_out = usdc_addr
-                # decimals_out = usdc_decimals
 
             # Look up fee tier from POOL_FEES
             fee = POOL_FEES.get(product_id, 3000)
