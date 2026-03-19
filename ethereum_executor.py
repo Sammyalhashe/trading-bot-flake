@@ -427,12 +427,15 @@ class EthereumExecutor:
 
             # Approve max uint256 to avoid future approvals for this token
             # First, set allowance to 0 then to max (standard pattern for some tokens)
+            # Capture nonce once to avoid race conditions
+            base_nonce = self._get_nonce()
+
             tx0 = token_contract.functions.approve(
                 Web3.to_checksum_address(SWAP_ROUTER_ADDRESS),
                 0
             ).build_transaction({
                 'from': self.account.address,
-                'nonce': self._get_nonce(),
+                'nonce': base_nonce,
                 'gas': 100000,
                 'gasPrice': self._get_gas_price(),
                 'chainId': EXPECTED_CHAIN_ID,
@@ -440,14 +443,14 @@ class EthereumExecutor:
             signed_tx0 = self.w3.eth.account.sign_transaction(tx0, self.private_key)
             tx_hash0 = retry_rpc_call(lambda: self.w3.eth.send_raw_transaction(signed_tx0.raw_transaction))
             retry_rpc_call(lambda: self.w3.eth.wait_for_transaction_receipt(tx_hash0, timeout=120))
-            
-            # Then approve max
+
+            # Then approve max with next sequential nonce
             tx_max = token_contract.functions.approve(
                 Web3.to_checksum_address(SWAP_ROUTER_ADDRESS),
                 2**256 - 1
             ).build_transaction({
                 'from': self.account.address,
-                'nonce': self._get_nonce() + 1,  # Next nonce
+                'nonce': base_nonce + 1,  # Next nonce after first approval
                 'gas': 100000,
                 'gasPrice': self._get_gas_price(),
                 'chainId': EXPECTED_CHAIN_ID,
@@ -553,8 +556,11 @@ class EthereumExecutor:
             return {"success": True, "tx_hash": "paper"}
 
         try:
-            # Approve token_in
-            self._approve_token(token_in, amount_in)
+            # Approve token_in and verify it succeeded
+            approval_result = self._approve_token(token_in, amount_in)
+            if approval_result is None:
+                logging.error(f"Token approval failed for {token_in}, cannot execute swap")
+                return {"success": False, "error": "approval failed"}
 
             amount_out_min = self._get_amount_out_minimum(token_in, token_out, amount_in, fee)
 
