@@ -47,6 +47,12 @@
             chmod +x $out/bin/trading-notify
             wrapProgram $out/bin/trading-notify \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+
+            # Transaction debugger
+            mv $out/bin/debug_tx.py $out/bin/debug-tx
+            chmod +x $out/bin/debug-tx
+            wrapProgram $out/bin/debug-tx \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
           '';
         };
 
@@ -62,6 +68,10 @@
           notify = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/trading-notify";
+          };
+          debug-tx = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/debug-tx";
           };
         };
 

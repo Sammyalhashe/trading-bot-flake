@@ -246,13 +246,32 @@ def is_asset_blacklisted(asset):
 
 # --- Strategy Logic ---
 def analyze_trend(df):
+    """Compute short and long moving averages for trend detection.
+
+    The bot uses MA crossover to determine market direction:
+      - short_MA > long_MA * 1.002 → uptrend (BUY signal, 0.2% buffer avoids noise)
+      - short_MA < long_MA * 0.998 → downtrend (SELL/SHORT signal)
+    The 0.2% buffer prevents whipsawing on flat markets.
+    """
     if df is None or len(df) < LONG_WINDOW: return None, None
     s_ma = df['close'].rolling(window=SHORT_WINDOW).mean().iloc[-1]
     l_ma = df['close'].rolling(window=LONG_WINDOW).mean().iloc[-1]
     return s_ma, l_ma
 
 def calculate_rsi(df, period=14):
-    """Calculate RSI (Relative Strength Index) from candle close prices."""
+    """Calculate RSI (Relative Strength Index) from candle close prices.
+
+    RSI measures momentum on a 0–100 scale:
+      - RSI > 70 → overbought (price rose too fast, likely to pull back)
+      - RSI < 30 → oversold  (price dropped too fast, likely to bounce)
+
+    Formula:
+      RS  = avg_gain / avg_loss   (over `period` bars)
+      RSI = 100 - 100/(1 + RS)
+
+    When gains dominate, RS is large → RSI approaches 100.
+    When losses dominate, RS is small → RSI approaches 0.
+    """
     if df is None or len(df) < period + 1:
         return None
     delta = df['close'].diff()
@@ -265,7 +284,20 @@ def calculate_rsi(df, period=14):
     return rsi.iloc[-1]
 
 def calculate_atr(df, period=14):
-    """Calculate ATR (Average True Range) from candle OHLC data."""
+    """Calculate ATR (Average True Range) from candle OHLC data.
+
+    ATR measures volatility — the average size of recent price swings.
+    Used to set trailing stops that adapt to current market conditions:
+      - High ATR → wider stop (volatile market, avoid getting stopped out by noise)
+      - Low ATR  → tighter stop (calm market, protect gains more aggressively)
+
+    True Range for each bar is the largest of:
+      1. high - low                (intra-bar range)
+      2. |high - previous close|   (gap up)
+      3. |low  - previous close|   (gap down)
+
+    ATR = simple moving average of True Range over `period` bars.
+    """
     if df is None or len(df) < period + 1:
         return None
     high = df['high']
@@ -311,6 +343,9 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     elif ex_value > peak:
         save_peak_value(ex_value, ex_id)
         peak = ex_value
+    # Drawdown = how far the portfolio has fallen from its all-time high (per-executor).
+    # drawdown% = (peak - current) / peak * 100
+    # e.g. peak=$10k, current=$9k → drawdown = 10%
     drawdown_pct = ((peak - ex_value) / peak * 100) if peak > 0 else 0
 
     # Drawdown guard: skip buys if drawdown exceeds limit
@@ -385,6 +420,10 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
         try:
             price_data = data_provider.get_product_details(product_id)
             price = float(price_data['price'])
+            # Buy size = min of two caps, split across TOP_MOMENTUM_COUNT candidates:
+            #   1. available_usdc * RISK_PER_TRADE_PCT / N  (don't spend more than we have)
+            #   2. trade_limit / N  (don't exceed portfolio risk allocation)
+            # trade_limit = portfolio_value * PORTFOLIO_RISK_PERCENTAGE (e.g. 15%)
             buy_size = min(available_usdc * RISK_PER_TRADE_PCT / TOP_MOMENTUM_COUNT, trade_limit / TOP_MOMENTUM_COUNT)
             # Enforce MAX_POSITION_USD per-asset position cap
             current_asset_value = held.get(asset, 0) * price
@@ -506,15 +545,24 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                 save_state(state)
 
             # Priority 3: Trailing Stop-Loss (ATR-based dynamic stop)
+            #
+            # Instead of a fixed % stop, we use ATR to adapt to volatility:
+            #   atr_stop = 2 * ATR / price
+            # This gives the stop as a fraction of current price. Multiplying ATR
+            # by 2 means we tolerate ~2 average bars of adverse movement before
+            # triggering. The result is clamped to [2%, 15%] to avoid extremes.
+            #
+            # The stop trails the High Water Mark (HWM), not the entry price.
+            # As price rises, HWM rises with it, ratcheting the stop upward.
+            # Sell triggers when: price < HWM * (1 - atr_stop)
             elif True:
-                # Calculate dynamic trailing stop from ATR
                 atr = calculate_atr(df)
                 if atr is not None and price > 0:
                     atr_stop = 2 * atr / price
-                    atr_stop = max(0.02, min(0.15, atr_stop))  # Floor 2%, cap 15%
+                    atr_stop = max(0.02, min(0.15, atr_stop))
                     effective_trailing_stop = atr_stop
                 else:
-                    effective_trailing_stop = TRAILING_STOP_PCT  # Fallback to flat
+                    effective_trailing_stop = TRAILING_STOP_PCT
                 if price < hwm * (1 - effective_trailing_stop):
                     sell_trigger = True
                     sell_ratio = 1.0
@@ -555,6 +603,10 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
 
                     logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
                     # Track PnL (fee-aware)
+                    # PnL = (exit - entry) * qty - fees
+                    # Fee estimate: entry_price * qty * ROUND_TRIP_FEE_PCT
+                    # This accounts for both the buy and sell side fees (~0.3% each
+                    # on Uniswap V3 0.3% pools, totaling ~0.6% round-trip).
                     if entry:
                         fee_cost = entry * sell_amount * ROUND_TRIP_FEE_PCT
                         pnl = (exit_price - entry) * sell_amount - fee_cost
@@ -616,7 +668,10 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                         if isinstance(result, dict) and result.get("success") is False:
                             logging.warning(f"[{ex_id}] Short close for {asset} failed: {result.get('error')}")
                         else:
-                            # Short PnL is inverted: profit when price drops
+                            # Short PnL is inverted: profit when price drops.
+                            # qty = short_value / short_entry (how many units we shorted)
+                            # PnL = (entry - exit) * qty - fees
+                            # Positive when exit < entry (price dropped as expected).
                             pnl = (short_entry - price) * (short_value / short_entry) - short_entry * (short_value / short_entry) * ROUND_TRIP_FEE_PCT
                             is_win = pnl > 0
                             record_trade(is_win, pnl)

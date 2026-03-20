@@ -87,13 +87,21 @@ POOLS = {
     "BTC-USDC": "0x49e30c322E2474B3767de9FC4448C1e9ceD6552f", # WBTC/USDC 0.3%
 }
 
-# Pool fee tiers (matching POOLS)
+# Pool fee tiers (matching POOLS).
+# Uniswap V3 fee tiers are in hundredths of a basis point:
+#   500 = 0.05%, 3000 = 0.30%, 10000 = 1.00%
+# Each token pair has separate pools at different fee tiers with different
+# liquidity. We use the 0.3% pools which have the deepest liquidity for
+# major pairs on Base.
 POOL_FEES = {
     "ETH-USDC": 3000,
     "BTC-USDC": 3000,
 }
 
-# Slippage tolerance (0.5%)
+# Slippage tolerance in basis points (1 bps = 0.01%, so 50 bps = 0.5%).
+# This is how much worse than the quoted price we're willing to accept.
+# Too tight (e.g. 10 bps) → transactions revert on normal price movement.
+# Too loose (e.g. 500 bps) → vulnerable to sandwich attacks / MEV extraction.
 SLIPPAGE_BPS = 50  # 0.5%
 # Minimum ETH balance required for gas (in ETH)
 MIN_GAS_ETH = float(os.environ.get("MIN_GAS_ETH", "0.001"))
@@ -348,9 +356,18 @@ class EthereumExecutor:
                 slot0 = pool_contract.functions.slot0().call()
                 sqrtPriceX96 = slot0[0]
 
+                # Uniswap V3 stores price as sqrt(token1/token0) * 2^96.
+                # To recover the actual price ratio (token1 per token0):
+                #   price = (sqrtPriceX96 / 2^96)^2
+                # This gives the price in raw smallest-unit terms (wei/wei).
                 price = (Decimal(sqrtPriceX96) / Decimal(2**96))**2
 
-                # WETH/USDC: WETH(18) is token0, USDC(6) is token1. Price = 1/0 = USDC per WETH.
+                # Adjust for decimal differences between token0 and token1.
+                # The raw price is in (token1_smallest_units / token0_smallest_units).
+                # To get human-readable price (e.g. USDC per ETH), multiply by
+                # 10^(token0_decimals - token1_decimals):
+                #   ETH-USDC: 10^(18-6) = 10^12
+                #   BTC-USDC: 10^(8-6)  = 10^2
                 if product_id == "ETH-USDC":
                     adjusted_price = float(price * Decimal(10**12))
                 elif product_id == "BTC-USDC":
@@ -530,39 +547,93 @@ class EthereumExecutor:
         return self._call_with_failover(_do_get_quote)
 
     def _get_amount_out_minimum(self, token_in, token_out, amount_in, fee, slippage_bps=SLIPPAGE_BPS):
-        """Calculate amountOutMinimum with slippage using Quoter."""
+        """Calculate the minimum acceptable output for a swap (slippage protection).
+
+        This value becomes the amountOutMinimum param in Uniswap's exactInputSingle.
+        If the pool can't deliver at least this much, the transaction reverts on-chain,
+        protecting against sandwich attacks and excessive price impact.
+
+        Strategy (in priority order):
+          1. Ask the Uniswap Quoter contract for the expected output (most accurate).
+          2. Fall back to reading the pool's sqrtPriceX96 from slot0 and computing
+             the price manually, adjusting for decimal differences between tokens.
+          3. Last resort: estimate from amount_in scaled by the decimal difference
+             between tokens, minus a conservative 2% buffer.
+
+        After getting the expected output, subtract slippage_bps (default 50 = 0.5%)
+        to allow for normal price movement between quote and execution.
+        """
         try:
+            # --- Primary: use Quoter contract (simulates the swap off-chain) ---
             amount_out = self.get_quote(token_in, token_out, amount_in, fee)
+
             if amount_out is None:
-                # Fallback to pool price calculation
+                # --- Fallback: read pool price from slot0 ---
                 logging.warning("Quote failed, falling back to pool price calculation")
+
+                # Build a reverse lookup: token address -> symbol (e.g. WETH -> ETH)
+                addr_to_symbol = {}
+                for sym, addr in TOKENS.items():
+                    addr_to_symbol[addr.lower()] = sym
+                sym_in = addr_to_symbol.get(token_in.lower(), "")
+                sym_out = addr_to_symbol.get(token_out.lower(), "")
+                if sym_in == "WETH":
+                    sym_in = "ETH"
+                if sym_out == "WETH":
+                    sym_out = "ETH"
+
+                pool_found = False
                 for pool_id, pool_addr in POOLS.items():
-                    if token_in.upper() in pool_id and token_out.upper() in pool_id:
+                    parts = set(pool_id.split("-"))
+                    if parts == {sym_in, sym_out}:
                         pool_address = pool_addr
-                        pool_contract = self.w3.eth.contract(address=pool_address, abi=UNISWAP_V3_POOL_ABI)
+                        pool_contract = self.w3.eth.contract(
+                            address=Web3.to_checksum_address(pool_address),
+                            abi=UNISWAP_V3_POOL_ABI
+                        )
 
                         def _fetch_slot0():
                             return pool_contract.functions.slot0().call()
                         slot0 = retry_rpc_call(_fetch_slot0)
 
+                        # sqrtPriceX96 encodes price as sqrt(token1/token0) * 2^96.
+                        # Squaring and dividing by 2^192 gives the raw price ratio.
                         sqrtPriceX96 = slot0[0]
                         price_ratio = (Decimal(sqrtPriceX96) / Decimal(2**96)) ** 2
-                        # Use cached decimals instead of RPC calls
+
+                        # Adjust for decimal differences:
+                        # raw price is in (token1 smallest units) / (token0 smallest units),
+                        # so we scale by 10^(decimals_in - decimals_out) to get correct output units.
                         decimals_in = self._get_decimals(token_in)
                         decimals_out = self._get_decimals(token_out)
                         factor = price_ratio * Decimal(10 ** (decimals_in - decimals_out))
                         amount_out = int(Decimal(amount_in) * factor)
+                        pool_found = True
                         break
-                else:
-                    # No pool found, assume 1% slippage
-                    amount_out = int(amount_in * 0.99)
 
-            # Apply slippage
+                if not pool_found:
+                    # Last resort: scale amount_in by the decimal difference and apply
+                    # a conservative 2% buffer. This avoids the old bug where we used
+                    # amount_in * 0.99 without adjusting for decimals (e.g. WETH 18-dec
+                    # amount treated as USDC 6-dec would be 10^12x too large).
+                    logging.warning("No pool found for fallback price, using decimal-adjusted estimate")
+                    decimals_in = self._get_decimals(token_in)
+                    decimals_out = self._get_decimals(token_out)
+                    decimal_scale = Decimal(10 ** (decimals_out - decimals_in))
+                    amount_out = int(Decimal(amount_in) * decimal_scale * Decimal("0.98"))
+
+            # Apply slippage tolerance: reduce expected output by slippage_bps basis points.
+            # e.g. 50 bps -> multiply by 0.995, so the tx accepts up to 0.5% worse execution.
             min_out = int(Decimal(amount_out) * (Decimal(1) - Decimal(slippage_bps) / Decimal(10000)))
+            logging.info(f"amountOutMinimum: {min_out} (expected: {amount_out}, slippage: {slippage_bps}bps)")
             return min_out
         except Exception as e:
             logging.warning(f"Could not calculate amountOutMinimum: {e}")
-            return int(amount_in * 0.99)
+            # Emergency fallback: scale by decimal difference with 2% buffer
+            decimals_in = self._get_decimals(token_in)
+            decimals_out = self._get_decimals(token_out)
+            decimal_scale = Decimal(10 ** (decimals_out - decimals_in))
+            return int(Decimal(amount_in) * decimal_scale * Decimal("0.98"))
 
     def _get_fee_for_tokens(self, token_in, token_out):
         """Look up the pool fee tier for a token pair from POOL_FEES."""
@@ -587,7 +658,27 @@ class EthereumExecutor:
         return 3000
 
     def execute_swap(self, token_in, token_out, amount_in, recipient, fee=None):
-        """Execute a swap via Uniswap V3 SwapRouter."""
+        """Execute a token swap on-chain via Uniswap V3 SwapRouter02.
+
+        Flow:
+          1. Pre-flight: verify wallet has enough ETH to pay gas fees.
+          2. Approve: grant the SwapRouter permission to spend our token_in.
+             Uses max uint256 approval so we only need to do this once per token.
+          3. Quote: call _get_amount_out_minimum to determine the worst acceptable
+             output (slippage protection). If the pool can't deliver this much,
+             the swap reverts on-chain rather than giving us a bad price.
+          4. Build the exactInputSingle call — a single-hop swap through one pool.
+          5. Submit with retry logic for transient nonce/gas-price issues.
+          6. Wait for the transaction receipt (up to 180s) and check success.
+
+        Args:
+            token_in:  Address of the token we're selling.
+            token_out: Address of the token we're buying.
+            amount_in: Amount to sell, in token_in's smallest unit (wei for WETH,
+                       raw 6-decimal units for USDC, etc.).
+            recipient: Address that receives the output tokens.
+            fee:       Uniswap pool fee tier in hundredths of a bip (3000 = 0.3%).
+        """
         if fee is None:
             fee = self._get_fee_for_tokens(token_in, token_out)
         if self.trading_mode != "live":
@@ -605,30 +696,33 @@ class EthereumExecutor:
             except Exception as e:
                 logging.warning(f"Could not check gas balance: {e}, proceeding anyway")
 
-            # Approve token_in and verify it succeeded
+            # ERC-20 approve: the router needs permission to pull our tokens
             approval_result = self._approve_token(token_in, amount_in)
             if approval_result is None:
                 logging.error(f"Token approval failed for {token_in}, cannot execute swap")
                 return {"success": False, "error": "approval failed"}
 
+            # Calculate the minimum output we'll accept (slippage protection)
             amount_out_min = self._get_amount_out_minimum(token_in, token_out, amount_in, fee)
 
+            # Deadline: tx reverts if not mined within this window
             deadline = int(time.time()) + TX_DEADLINE_SECONDS
 
             logging.info(f"Swap Parameters: In={amount_in}, OutMin={amount_out_min}, Fee={fee}, Deadline={deadline}")
 
+            # Uniswap V3 exactInputSingle params — single-pool swap
             params = (
                 Web3.to_checksum_address(token_in),
                 Web3.to_checksum_address(token_out),
-                fee,
+                fee,                                   # pool fee tier (e.g. 3000 = 0.3%)
                 Web3.to_checksum_address(recipient),
                 deadline,
                 amount_in,
-                amount_out_min,
-                0  # sqrtPriceLimitX96
+                amount_out_min,                         # revert if output < this
+                0  # sqrtPriceLimitX96: 0 = no price limit (we rely on amountOutMinimum)
             )
 
-            # Build and send transaction with retry for nonce/underpriced errors
+            # Retry loop handles transient errors: stale nonce or gas price too low
             tx_hash = None
             for attempt in range(4):
                 try:
@@ -639,9 +733,9 @@ class EthereumExecutor:
                         'gas': 300000,
                         'gasPrice': self._get_gas_price(),
                         'chainId': EXPECTED_CHAIN_ID,
-                        'value': 0
+                        'value': 0  # not sending ETH, we're swapping ERC-20 tokens
                     })
-                    
+
                     signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
 
                     def _send_swap():
@@ -686,6 +780,16 @@ class EthereumExecutor:
             return {"success": False, "error": str(e)}
 
     def place_market_order(self, product_id, side, amount_quote_currency=None, amount_base_currency=None):
+        """Convert a high-level buy/sell into an on-chain swap.
+
+        For BUY:  swap USDC -> token. amount_quote_currency is the USDC amount to spend.
+        For SELL: swap token -> USDC. amount_base_currency is the token amount to sell.
+                  If only amount_quote_currency is given, we look up the current price
+                  to calculate how many tokens that corresponds to.
+
+        Amounts are passed in human-readable units (e.g. 10.5 USDC, 0.005 ETH) and
+        converted to raw integer units here using each token's decimals.
+        """
         addr = self.get_token_address(product_id)
         if not addr:
             logging.warning(f"EthereumExecutor: Asset {product_id} not found in Base registry. Skipping.")
@@ -694,13 +798,11 @@ class EthereumExecutor:
         logging.info(f"EthereumExecutor: [BASE] Placing {side} for {product_id} ({addr}) on-chain.")
 
         if self.trading_mode == "live":
-            # Determine token addresses
             usdc_addr = TOKENS.get("USDC")
             token_addr = addr
 
-            # Get decimals from cache (no RPC call)
-            usdc_decimals = self._get_decimals(usdc_addr)
-            token_decimals = self._get_decimals(token_addr)
+            usdc_decimals = self._get_decimals(usdc_addr)    # 6 for USDC
+            token_decimals = self._get_decimals(token_addr)   # 18 for WETH, 8 for WBTC
 
             # Determine amount in wei
             if side == "BUY":
