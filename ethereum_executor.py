@@ -8,7 +8,9 @@ import requests
 # Strict Network Validation for Base
 EXPECTED_CHAIN_ID = 8453  # Base Mainnet
 
-# Minimal ABI
+# Minimal ABI for ERC-20 tokens. We only need balanceOf (check holdings),
+# decimals (convert between human and raw units), approve (grant spending
+# permission to the router), and allowance (check existing permission).
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
@@ -16,33 +18,37 @@ ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}], "name": "allowance", "outputs": [{"name": "remaining", "type": "uint256"}], "type": "function"}
 ]
 
+# Uniswap V3 Pool ABI — only need slot0 (current price as sqrtPriceX96 + tick)
+# and liquidity (active liquidity at current tick). Used for price fallback
+# when the Quoter contract is unavailable.
 UNISWAP_V3_POOL_ABI = [
     {"constant": True, "inputs": [], "name": "slot0", "outputs": [{"name": "sqrtPriceX96", "type": "uint160"}, {"name": "tick", "type": "int24"}, {"name": "observationIndex", "type": "uint16"}, {"name": "observationCardinality", "type": "uint16"}, {"name": "observationCardinalityNext", "type": "uint16"}, {"name": "feeProtocol", "type": "uint8"}, {"name": "unlocked", "type": "bool"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "liquidity", "outputs": [{"name": "", "type": "uint128"}], "type": "function"}
 ]
 
-# Uniswap V3 SwapRouter02 on Base
+# SwapRouter02 ABI — this contract's exactInput uses a 4-field struct
+# (path, recipient, amountIn, amountOutMinimum). The path is packed bytes:
+# tokenIn_address(20) + pool_fee(3) + tokenOut_address(20) = 43 bytes for
+# a single-hop swap. web3.py encodes the struct into ABI calldata automatically.
+# Note: the standard SwapRouter02 uses exactInputSingle with 8 fields + selector
+# 0x414bf389, but the Base deployment uses exactInput with 4 fields + 0xb858183f.
 SWAP_ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481"
 SWAP_ROUTER_ABI = [
     {
         "inputs": [
             {
                 "components": [
-                    {"internalType": "address", "name": "tokenIn", "type": "address"},
-                    {"internalType": "address", "name": "tokenOut", "type": "address"},
-                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                    {"internalType": "bytes", "name": "path", "type": "bytes"},
                     {"internalType": "address", "name": "recipient", "type": "address"},
-                    {"internalType": "uint256", "name": "deadline", "type": "uint256"},
                     {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-                    {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
-                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}
+                    {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"}
                 ],
-                "internalType": "struct ISwapRouter.ExactInputSingleParams",
+                "internalType": "struct IV3SwapRouter.ExactInputParams",
                 "name": "params",
                 "type": "tuple"
             }
         ],
-        "name": "exactInputSingle",
+        "name": "exactInput",
         "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
         "stateMutability": "payable",
         "type": "function"
@@ -567,7 +573,9 @@ class EthereumExecutor:
             # --- Primary: use Quoter contract (simulates the swap off-chain) ---
             amount_out = self.get_quote(token_in, token_out, amount_in, fee)
 
-            if amount_out is None:
+            if amount_out is not None:
+                logging.info(f"Quoter returned: {amount_out} for {amount_in} of {token_in} -> {token_out}")
+            else:
                 # --- Fallback: read pool price from slot0 ---
                 logging.warning("Quote failed, falling back to pool price calculation")
 
@@ -596,18 +604,28 @@ class EthereumExecutor:
                             return pool_contract.functions.slot0().call()
                         slot0 = retry_rpc_call(_fetch_slot0)
 
-                        # sqrtPriceX96 encodes price as sqrt(token1/token0) * 2^96.
-                        # Squaring and dividing by 2^192 gives the raw price ratio.
+                        # Price math: sqrtPriceX96 encodes sqrt(token1/token0) * 2^96.
+                        # Squaring gives token1_raw / token0_raw directly — no decimal
+                        # adjustment needed because the ratio is already in smallest units.
+                        # Example: if 1 WBTC = 70325 USDC, and WBTC has 8 decimals while
+                        # USDC has 6, then price_ratio = 703.25 (10^8 WBTC-raw costs
+                        # 70325*10^6 USDC-raw → ratio = 7.0325e10 / 1e8 = 703.25).
+                        #
+                        # Which side to multiply vs divide depends on token ordering:
+                        #   sqrtPriceX96² = token1/token0, so:
+                        #   token0→token1: out_raw = in_raw * price_ratio
+                        #   token1→token0: out_raw = in_raw / price_ratio
+                        # In Uniswap V3, token0 is always the lower contract address.
                         sqrtPriceX96 = slot0[0]
                         price_ratio = (Decimal(sqrtPriceX96) / Decimal(2**96)) ** 2
-
-                        # Adjust for decimal differences:
-                        # raw price is in (token1 smallest units) / (token0 smallest units),
-                        # so we scale by 10^(decimals_in - decimals_out) to get correct output units.
-                        decimals_in = self._get_decimals(token_in)
-                        decimals_out = self._get_decimals(token_out)
-                        factor = price_ratio * Decimal(10 ** (decimals_in - decimals_out))
-                        amount_out = int(Decimal(amount_in) * factor)
+                        token_in_lower = token_in.lower()
+                        token_out_lower = token_out.lower()
+                        if token_in_lower < token_out_lower:
+                            # token_in is token0: out = in * price_ratio
+                            amount_out = int(Decimal(amount_in) * price_ratio)
+                        else:
+                            # token_in is token1: out = in / price_ratio
+                            amount_out = int(Decimal(amount_in) / price_ratio)
                         pool_found = True
                         break
 
@@ -623,7 +641,10 @@ class EthereumExecutor:
                     amount_out = int(Decimal(amount_in) * decimal_scale * Decimal("0.98"))
 
             # Apply slippage tolerance: reduce expected output by slippage_bps basis points.
-            # e.g. 50 bps -> multiply by 0.995, so the tx accepts up to 0.5% worse execution.
+            # 1 basis point (bps) = 0.01%, so 50 bps = 0.5%.
+            # Formula: min_out = expected * (1 - bps/10000) = expected * 0.995.
+            # If the pool's actual output drops below this between quote and execution
+            # (due to other trades or MEV), the tx reverts instead of giving a bad price.
             min_out = int(Decimal(amount_out) * (Decimal(1) - Decimal(slippage_bps) / Decimal(10000)))
             logging.info(f"amountOutMinimum: {min_out} (expected: {amount_out}, slippage: {slippage_bps}bps)")
             return min_out
@@ -658,26 +679,18 @@ class EthereumExecutor:
         return 3000
 
     def execute_swap(self, token_in, token_out, amount_in, recipient, fee=None):
-        """Execute a token swap on-chain via Uniswap V3 SwapRouter02.
+        """Execute a token swap on-chain via Uniswap V3 SwapRouter02 exactInput.
+
+        Uses exactInput((bytes,address,uint256,uint256,uint256)) with a packed
+        path encoding for single-hop swaps through Uniswap V3 pools.
 
         Flow:
           1. Pre-flight: verify wallet has enough ETH to pay gas fees.
-          2. Approve: grant the SwapRouter permission to spend our token_in.
-             Uses max uint256 approval so we only need to do this once per token.
-          3. Quote: call _get_amount_out_minimum to determine the worst acceptable
-             output (slippage protection). If the pool can't deliver this much,
-             the swap reverts on-chain rather than giving us a bad price.
-          4. Build the exactInputSingle call — a single-hop swap through one pool.
+          2. Approve: grant the SwapRouter permission to spend token_in.
+          3. Quote: _get_amount_out_minimum for slippage protection.
+          4. Build the exactInput call with packed path.
           5. Submit with retry logic for transient nonce/gas-price issues.
-          6. Wait for the transaction receipt (up to 180s) and check success.
-
-        Args:
-            token_in:  Address of the token we're selling.
-            token_out: Address of the token we're buying.
-            amount_in: Amount to sell, in token_in's smallest unit (wei for WETH,
-                       raw 6-decimal units for USDC, etc.).
-            recipient: Address that receives the output tokens.
-            fee:       Uniswap pool fee tier in hundredths of a bip (3000 = 0.3%).
+          6. Wait for receipt and check success.
         """
         if fee is None:
             fee = self._get_fee_for_tokens(token_in, token_out)
@@ -705,21 +718,42 @@ class EthereumExecutor:
             # Calculate the minimum output we'll accept (slippage protection)
             amount_out_min = self._get_amount_out_minimum(token_in, token_out, amount_in, fee)
 
+            # Sanity check: amountOutMinimum must be > 0 or the swap is meaningless
+            if amount_out_min <= 0:
+                logging.error(f"amountOutMinimum is {amount_out_min}, using 0 (no slippage protection)")
+                amount_out_min = 0
+
             # Deadline: tx reverts if not mined within this window
             deadline = int(time.time()) + TX_DEADLINE_SECONDS
 
-            logging.info(f"Swap Parameters: In={amount_in}, OutMin={amount_out_min}, Fee={fee}, Deadline={deadline}")
+            dec_in = self._get_decimals(token_in)
+            dec_out = self._get_decimals(token_out)
+            human_in = amount_in / (10 ** dec_in)
+            human_out_min = amount_out_min / (10 ** dec_out) if amount_out_min > 0 else 0
+            logging.info(f"Swap: {human_in:.6f} -> min {human_out_min:.8f} (raw: {amount_in} -> {amount_out_min}), fee={fee}")
 
-            # Uniswap V3 exactInputSingle params — single-pool swap
+            # Build the V3 path: tokenIn + fee(3 bytes big-endian) + tokenOut.
+            # This packed-bytes format encodes a single-hop route. For multi-hop
+            # (e.g. USDC→WETH→TOKEN), you'd chain more fee+token pairs: 43 + 23n bytes.
+            # The fee is a uint24 in hundredths of a basis point: 3000 = 0.30%.
+            path = (
+                bytes.fromhex(token_in[2:])
+                + int(fee).to_bytes(3, 'big')
+                + bytes.fromhex(token_out[2:])
+            )
+
+            # exactInput params — web3.py ABI-encodes this 4-field struct into calldata
+            # with the function selector 0xb858183f automatically.
+            #   path:            packed route through Uniswap V3 pools (see above)
+            #   recipient:       address that receives the output tokens
+            #   amountIn:        input amount in token's smallest unit (e.g. 500000 = 0.5 USDC)
+            #   amountOutMinimum: revert if the pool can't deliver at least this much
+            #                     (set by _get_amount_out_minimum with slippage applied)
             params = (
-                Web3.to_checksum_address(token_in),
-                Web3.to_checksum_address(token_out),
-                fee,                                   # pool fee tier (e.g. 3000 = 0.3%)
+                path,
                 Web3.to_checksum_address(recipient),
-                deadline,
                 amount_in,
-                amount_out_min,                         # revert if output < this
-                0  # sqrtPriceLimitX96: 0 = no price limit (we rely on amountOutMinimum)
+                amount_out_min,
             )
 
             # Retry loop handles transient errors: stale nonce or gas price too low
@@ -727,13 +761,13 @@ class EthereumExecutor:
             for attempt in range(4):
                 try:
                     current_nonce = self._get_nonce()
-                    tx = self.router_contract.functions.exactInputSingle(params).build_transaction({
+                    tx = self.router_contract.functions.exactInput(params).build_transaction({
                         'from': self.account.address,
                         'nonce': current_nonce,
-                        'gas': 300000,
+                        'gas': 500000,
                         'gasPrice': self._get_gas_price(),
                         'chainId': EXPECTED_CHAIN_ID,
-                        'value': 0  # not sending ETH, we're swapping ERC-20 tokens
+                        'value': 0,
                     })
 
                     signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
@@ -773,8 +807,15 @@ class EthereumExecutor:
                 logging.info(f"Swap successful. Tx: {tx_hash.hex()}")
                 return {"success": True, "confirmed": True, "tx_hash": tx_hash.hex()}
             else:
-                logging.error(f"Swap transaction failed: {receipt}")
-                return {"success": False, "error": "transaction failed"}
+                tx_hex = tx_hash.hex()
+                gas_used = receipt.get('gasUsed', '?')
+                logging.error(
+                    f"Swap reverted. Tx: {tx_hex} | "
+                    f"Gas used: {gas_used}/500000 | "
+                    f"In={amount_in} OutMin={amount_out_min} Fee={fee} | "
+                    f"https://basescan.org/tx/{tx_hex}"
+                )
+                return {"success": False, "error": "transaction failed", "tx_hash": tx_hex}
         except Exception as e:
             logging.error(f"Swap execution failed: {e}")
             return {"success": False, "error": str(e)}
