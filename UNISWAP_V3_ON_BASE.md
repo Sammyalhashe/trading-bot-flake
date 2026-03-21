@@ -37,6 +37,32 @@ Pools are identified by `(token0, token1, fee)` where token0 is the lower addres
 Fee tiers: 500 = 0.05%, 3000 = 0.30%, 10000 = 1.00%.
 The 0.3% tier has the deepest liquidity for major pairs on Base.
 
+## Route Finding
+
+The bot uses a single-hop-first / multi-hop-fallback strategy to find the best
+swap route through Uniswap V3 pools. Pools are discovered dynamically via the
+V3 Factory contract (`getPool(tokenA, tokenB, fee)`), and results are cached
+to avoid redundant RPC calls.
+
+**Strategy:**
+
+1. **Single-hop (preferred):** For a given token pair, try all three fee tiers
+   (500, 3000, 10000) via `factory.getPool(tokenA, tokenB, fee)`. If a pool
+   exists with liquidity, use it directly. The 0.3% tier (3000) typically has
+   the deepest liquidity for major pairs.
+
+2. **Multi-hop via WETH (fallback):** If no direct pool exists for a pair
+   (e.g. DEGEN→USDC), route through WETH as an intermediate hop:
+   `DEGEN → WETH → USDC`. Each leg is resolved independently using the same
+   single-hop logic.
+
+3. **Route cache:** Discovered pool addresses are cached in memory so repeated
+   lookups for the same pair skip the factory call entirely.
+
+Example: swapping DEGEN for USDC — no direct DEGEN/USDC pool exists, so the
+bot finds DEGEN/WETH (fee 10000) and WETH/USDC (fee 3000) and constructs a
+multi-hop path.
+
 ## The `exactInput` Function
 
 The Base SwapRouter02 uses `exactInput` with selector `0xb858183f` and a 4-field struct:
@@ -64,14 +90,22 @@ The `path` field is packed bytes (not ABI-encoded), 43 bytes for a single hop:
 [tokenIn address: 20 bytes][pool fee: 3 bytes big-endian][tokenOut address: 20 bytes]
 ```
 
-Example for USDC → WETH at 0.3% fee:
+Example for USDC → WETH at 0.3% fee (43 bytes):
 ```
 833589fcd6edb6e08f4c7c32d4f71b54bda02913  000bb8  4200000000000000000000000000000000000006
 |____________ USDC _______________________| |_3000_| |____________ WETH ________________|
 ```
 
-For multi-hop (e.g. USDC → WETH → TOKEN), chain more fee+token pairs
-(total = 20 + (23 × n_hops) bytes).
+For multi-hop (e.g. DEGEN → WETH → USDC), chain more fee+token pairs
+(total = 20 + (23 × n_hops) bytes). A 2-hop path is 66 bytes:
+
+```
+4ed4e281562193f5c8c11259d3e21839951e7d23  002710  4200000000000000000000000000000000000006  000bb8  833589fcd6edb6e08f4c7c32d4f71b54bda02913
+|____________ DEGEN ______________________| |_10000_| |____________ WETH ________________| |_3000_| |____________ USDC _______________________|
+```
+
+The router decodes the path by reading 20 bytes (address) + 3 bytes (fee) repeatedly
+until it reaches the end, executing each hop sequentially in a single transaction.
 
 ## Price Math (sqrtPriceX96)
 
@@ -127,6 +161,12 @@ at a bad price.
 - Too tight (e.g. 10 bps): reverts on normal price movement, especially in volatile markets
 - Too loose (e.g. 500 bps): vulnerable to sandwich attacks, MEV extraction
 
+**Multi-hop slippage:** For multi-hop routes, `_get_amount_out_minimum` chains
+quote estimates across each hop (e.g. DEGEN→WETH then WETH→USDC), applying
+slippage to the final output. Multi-hop swaps consume more gas (~200k–300k
+additional per extra hop) because the router calls multiple pool contracts in
+one transaction. The gas limit is set to 500000 which covers a 2-hop swap.
+
 ## The Swap Flow in Detail
 
 ### 1. Human → Raw Amounts (`place_market_order`)
@@ -160,7 +200,7 @@ web3.py's ABI encoder converts the `ExactInputParams` struct into calldata:
 000000000000...recipient             ← recipient address
 000000000000...000186a0              ← amountIn (1000000)
 000000000000...amountOutMinimum      ← slippage-protected minimum
-000000000000...002b                  ← path length (43 bytes)
+000000000000...002b                  ← path length (43 bytes single-hop, 66 for 2-hop)
 833589fc...000bb8...42000006          ← packed path data
 ```
 
@@ -170,11 +210,12 @@ via `eth_sendRawTransaction`.
 ### 5. On-Chain Execution
 
 1. Router receives the call, decodes the struct
-2. Router calls `Pool.swap()` with the specified parameters
-3. Pool calls back to the router via `uniswapV3SwapCallback(amount0, amount1, data)`
-4. Router calls `token.transferFrom(wallet, pool, input_amount)` to pull tokens
-5. Pool sends output tokens to the recipient
-6. Router returns `amountOut` to the caller
+2. Router parses the packed `path` bytes to determine hops
+3. For each hop, router calls `Pool.swap()` with the specified parameters
+4. Pool calls back to the router via `uniswapV3SwapCallback(amount0, amount1, data)`
+5. Router calls `token.transferFrom(wallet, pool, input_amount)` to pull tokens
+6. Pool sends output tokens to the next hop (or final recipient for last hop)
+7. Router returns total `amountOut` to the caller
 
 ## Debugging Lessons
 

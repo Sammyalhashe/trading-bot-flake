@@ -104,6 +104,23 @@ POOL_FEES = {
     "BTC-USDC": 3000,
 }
 
+UNISWAP_V3_FACTORY_ADDRESS = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+UNISWAP_V3_FACTORY_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "tokenA", "type": "address"},
+            {"internalType": "address", "name": "tokenB", "type": "address"},
+            {"internalType": "uint24", "name": "fee", "type": "uint24"}
+        ],
+        "name": "getPool",
+        "outputs": [{"internalType": "address", "name": "pool", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+FEE_TIERS = [500, 3000, 10000]  # 0.05%, 0.30%, 1.00%
+
 # Slippage tolerance in basis points (1 bps = 0.01%, so 50 bps = 0.5%).
 # This is how much worse than the quoted price we're willing to accept.
 # Too tight (e.g. 10 bps) → transactions revert on normal price movement.
@@ -172,6 +189,7 @@ class EthereumExecutor:
         self._gas_price_cache = None
         self._gas_price_cache_time = 0
         self._next_nonce = None  # Local nonce tracker to avoid RPC race conditions
+        self._route_cache = {}
 
         # Initialize Web3 with primary RPC
         self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 30}))
@@ -193,6 +211,10 @@ class EthereumExecutor:
             address=Web3.to_checksum_address(QUOTER_ADDRESS),
             abi=QUOTER_ABI
         )
+        self.factory_contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS),
+            abi=UNISWAP_V3_FACTORY_ABI
+        )
 
     def _rotate_rpc(self):
         """Rotate to the next available RPC endpoint."""
@@ -209,6 +231,10 @@ class EthereumExecutor:
         self.quoter_contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(QUOTER_ADDRESS),
             abi=QUOTER_ABI
+        )
+        self.factory_contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS),
+            abi=UNISWAP_V3_FACTORY_ABI
         )
 
     def _call_with_failover(self, func):
@@ -552,7 +578,33 @@ class EthereumExecutor:
 
         return self._call_with_failover(_do_get_quote)
 
-    def _get_amount_out_minimum(self, token_in, token_out, amount_in, fee, slippage_bps=SLIPPAGE_BPS):
+    def _estimate_from_pool(self, pool_address, token_in, token_out, amount_in):
+        """Estimate output by reading sqrtPriceX96 from a pool's slot0.
+
+        Returns the expected raw output amount, or None if the pool can't be read.
+        The price math uses sqrtPriceX96² = token1_raw/token0_raw, so:
+          token0→token1: out = in * price_ratio
+          token1→token0: out = in / price_ratio
+        """
+        try:
+            pool_contract = self.w3.eth.contract(
+                address=Web3.to_checksum_address(pool_address),
+                abi=UNISWAP_V3_POOL_ABI
+            )
+            def _fetch():
+                return pool_contract.functions.slot0().call()
+            slot0 = retry_rpc_call(_fetch)
+            sqrtPriceX96 = slot0[0]
+            price_ratio = (Decimal(sqrtPriceX96) / Decimal(2**96)) ** 2
+            if token_in.lower() < token_out.lower():
+                return int(Decimal(amount_in) * price_ratio)
+            else:
+                return int(Decimal(amount_in) / price_ratio)
+        except Exception as e:
+            logging.warning(f"Failed to estimate from pool {pool_address}: {e}")
+            return None
+
+    def _get_amount_out_minimum(self, token_in, token_out, amount_in, fee, slippage_bps=SLIPPAGE_BPS, route=None):
         """Calculate the minimum acceptable output for a swap (slippage protection).
 
         This value becomes the amountOutMinimum param in Uniswap's exactInputSingle.
@@ -569,6 +621,17 @@ class EthereumExecutor:
         After getting the expected output, subtract slippage_bps (default 50 = 0.5%)
         to allow for normal price movement between quote and execution.
         """
+        # Multi-hop: chain estimates through each hop, apply slippage only at the end
+        if route and route["type"] == "multi":
+            hops = route["hops"]
+            current_amount = amount_in
+            for i, hop in enumerate(hops):
+                hop_slippage = slippage_bps if i == len(hops) - 1 else 0
+                current_amount = self._get_amount_out_minimum(
+                    hop["token_in"], hop["token_out"], current_amount,
+                    hop["fee"], slippage_bps=hop_slippage
+                )
+            return current_amount
         try:
             # --- Primary: use Quoter contract (simulates the swap off-chain) ---
             amount_out = self.get_quote(token_in, token_out, amount_in, fee)
@@ -578,62 +641,43 @@ class EthereumExecutor:
             else:
                 # --- Fallback: read pool price from slot0 ---
                 logging.warning("Quote failed, falling back to pool price calculation")
-
-                # Build a reverse lookup: token address -> symbol (e.g. WETH -> ETH)
-                addr_to_symbol = {}
-                for sym, addr in TOKENS.items():
-                    addr_to_symbol[addr.lower()] = sym
-                sym_in = addr_to_symbol.get(token_in.lower(), "")
-                sym_out = addr_to_symbol.get(token_out.lower(), "")
-                if sym_in == "WETH":
-                    sym_in = "ETH"
-                if sym_out == "WETH":
-                    sym_out = "ETH"
-
                 pool_found = False
-                for pool_id, pool_addr in POOLS.items():
-                    parts = set(pool_id.split("-"))
-                    if parts == {sym_in, sym_out}:
-                        pool_address = pool_addr
-                        pool_contract = self.w3.eth.contract(
-                            address=Web3.to_checksum_address(pool_address),
-                            abi=UNISWAP_V3_POOL_ABI
+
+                # First try: use route info if available (covers dynamically discovered pools)
+                if route:
+                    for hop in route["hops"]:
+                        hop_match = (
+                            hop["token_in"].lower() == token_in.lower() and
+                            hop["token_out"].lower() == token_out.lower()
                         )
+                        if hop_match and "pool" in hop:
+                            amount_out = self._estimate_from_pool(hop["pool"], token_in, token_out, amount_in)
+                            if amount_out is not None:
+                                pool_found = True
+                                break
 
-                        def _fetch_slot0():
-                            return pool_contract.functions.slot0().call()
-                        slot0 = retry_rpc_call(_fetch_slot0)
+                # Second try: check hardcoded POOLS dict (backward compat)
+                if not pool_found:
+                    addr_to_symbol = {}
+                    for sym, addr in TOKENS.items():
+                        addr_to_symbol[addr.lower()] = sym
+                    sym_in = addr_to_symbol.get(token_in.lower(), "")
+                    sym_out = addr_to_symbol.get(token_out.lower(), "")
+                    if sym_in == "WETH":
+                        sym_in = "ETH"
+                    if sym_out == "WETH":
+                        sym_out = "ETH"
 
-                        # Price math: sqrtPriceX96 encodes sqrt(token1/token0) * 2^96.
-                        # Squaring gives token1_raw / token0_raw directly — no decimal
-                        # adjustment needed because the ratio is already in smallest units.
-                        # Example: if 1 WBTC = 70325 USDC, and WBTC has 8 decimals while
-                        # USDC has 6, then price_ratio = 703.25 (10^8 WBTC-raw costs
-                        # 70325*10^6 USDC-raw → ratio = 7.0325e10 / 1e8 = 703.25).
-                        #
-                        # Which side to multiply vs divide depends on token ordering:
-                        #   sqrtPriceX96² = token1/token0, so:
-                        #   token0→token1: out_raw = in_raw * price_ratio
-                        #   token1→token0: out_raw = in_raw / price_ratio
-                        # In Uniswap V3, token0 is always the lower contract address.
-                        sqrtPriceX96 = slot0[0]
-                        price_ratio = (Decimal(sqrtPriceX96) / Decimal(2**96)) ** 2
-                        token_in_lower = token_in.lower()
-                        token_out_lower = token_out.lower()
-                        if token_in_lower < token_out_lower:
-                            # token_in is token0: out = in * price_ratio
-                            amount_out = int(Decimal(amount_in) * price_ratio)
-                        else:
-                            # token_in is token1: out = in / price_ratio
-                            amount_out = int(Decimal(amount_in) / price_ratio)
-                        pool_found = True
-                        break
+                    for pool_id, pool_addr in POOLS.items():
+                        parts = set(pool_id.split("-"))
+                        if parts == {sym_in, sym_out}:
+                            result = self._estimate_from_pool(pool_addr, token_in, token_out, amount_in)
+                            if result is not None:
+                                amount_out = result
+                                pool_found = True
+                            break
 
                 if not pool_found:
-                    # Last resort: scale amount_in by the decimal difference and apply
-                    # a conservative 2% buffer. This avoids the old bug where we used
-                    # amount_in * 0.99 without adjusting for decimals (e.g. WETH 18-dec
-                    # amount treated as USDC 6-dec would be 10^12x too large).
                     logging.warning("No pool found for fallback price, using decimal-adjusted estimate")
                     decimals_in = self._get_decimals(token_in)
                     decimals_out = self._get_decimals(token_out)
@@ -678,22 +722,95 @@ class EthereumExecutor:
         logging.warning(f"No pool fee found for {token_in}/{token_out}, defaulting to 3000")
         return 3000
 
+    def _find_pool(self, token_a, token_b, fee):
+        """Look up if a Uniswap V3 pool exists for token pair at given fee tier.
+        Returns pool address if it exists and has liquidity, else None."""
+        try:
+            def _fetch():
+                return self.factory_contract.functions.getPool(
+                    Web3.to_checksum_address(token_a),
+                    Web3.to_checksum_address(token_b),
+                    fee
+                ).call()
+            pool_addr = retry_rpc_call(_fetch)
+            if pool_addr == "0x0000000000000000000000000000000000000000":
+                return None
+            pool_contract = self.w3.eth.contract(address=pool_addr, abi=UNISWAP_V3_POOL_ABI)
+            def _fetch_liq():
+                return pool_contract.functions.liquidity().call()
+            liquidity = retry_rpc_call(_fetch_liq)
+            return pool_addr if liquidity > 0 else None
+        except Exception:
+            return None
+
+    def _find_route(self, token_in, token_out):
+        """Find the best swap route between two tokens.
+        Prefers single-hop, falls back to multi-hop via WETH.
+        Caches results per token pair."""
+        cache_key = (token_in.lower(), token_out.lower())
+        if cache_key in self._route_cache:
+            return self._route_cache[cache_key]
+
+        weth = TOKENS["WETH"]
+
+        # Don't try multi-hop if one side is already WETH
+        if token_in.lower() == weth.lower() or token_out.lower() == weth.lower():
+            for fee in FEE_TIERS:
+                pool = self._find_pool(token_in, token_out, fee)
+                if pool:
+                    route = {"type": "single", "pool": pool, "hops": [{"token_in": token_in, "token_out": token_out, "fee": fee}]}
+                    self._route_cache[cache_key] = route
+                    return route
+            self._route_cache[cache_key] = None
+            return None
+
+        # Try single-hop first
+        for fee in FEE_TIERS:
+            pool = self._find_pool(token_in, token_out, fee)
+            if pool:
+                logging.info(f"Found direct pool for {token_in[:10]}→{token_out[:10]} at fee {fee}")
+                route = {"type": "single", "pool": pool, "hops": [{"token_in": token_in, "token_out": token_out, "fee": fee}]}
+                self._route_cache[cache_key] = route
+                return route
+
+        # Fallback: multi-hop via WETH
+        logging.info(f"No direct pool found, trying multi-hop via WETH for {token_in[:10]}→{token_out[:10]}")
+        for fee1 in FEE_TIERS:
+            hop1_pool = self._find_pool(token_in, weth, fee1)
+            if hop1_pool:
+                for fee2 in FEE_TIERS:
+                    hop2_pool = self._find_pool(weth, token_out, fee2)
+                    if hop2_pool:
+                        logging.info(f"Found multi-hop route: {token_in[:10]}→WETH (fee {fee1})→{token_out[:10]} (fee {fee2})")
+                        route = {
+                            "type": "multi",
+                            "hops": [
+                                {"token_in": token_in, "token_out": weth, "fee": fee1, "pool": hop1_pool},
+                                {"token_in": weth, "token_out": token_out, "fee": fee2, "pool": hop2_pool},
+                            ]
+                        }
+                        self._route_cache[cache_key] = route
+                        return route
+
+        logging.error(f"No route found for {token_in[:10]}→{token_out[:10]}")
+        self._route_cache[cache_key] = None
+        return None
+
     def execute_swap(self, token_in, token_out, amount_in, recipient, fee=None):
         """Execute a token swap on-chain via Uniswap V3 SwapRouter02 exactInput.
 
-        Uses exactInput((bytes,address,uint256,uint256,uint256)) with a packed
-        path encoding for single-hop swaps through Uniswap V3 pools.
+        Uses exactInput((bytes,address,uint256,uint256)) with a packed
+        path encoding for single-hop or multi-hop swaps through Uniswap V3 pools.
 
         Flow:
           1. Pre-flight: verify wallet has enough ETH to pay gas fees.
           2. Approve: grant the SwapRouter permission to spend token_in.
-          3. Quote: _get_amount_out_minimum for slippage protection.
-          4. Build the exactInput call with packed path.
-          5. Submit with retry logic for transient nonce/gas-price issues.
-          6. Wait for receipt and check success.
+          3. Route: find single-hop or multi-hop via WETH.
+          4. Quote: _get_amount_out_minimum for slippage protection.
+          5. Build the exactInput call with packed path.
+          6. Submit with retry logic for transient nonce/gas-price issues.
+          7. Wait for receipt and check success.
         """
-        if fee is None:
-            fee = self._get_fee_for_tokens(token_in, token_out)
         if self.trading_mode != "live":
             logging.info(f"[PAPER] Would swap {amount_in} of {token_in} for {token_out}")
             return {"success": True, "tx_hash": "paper"}
@@ -709,6 +826,12 @@ class EthereumExecutor:
             except Exception as e:
                 logging.warning(f"Could not check gas balance: {e}, proceeding anyway")
 
+            # Find the best route (single-hop or multi-hop via WETH)
+            route = self._find_route(token_in, token_out)
+            if route is None:
+                logging.error(f"No swap route found for {token_in}→{token_out}")
+                return {"success": False, "error": "no route found"}
+
             # ERC-20 approve: the router needs permission to pull our tokens
             approval_result = self._approve_token(token_in, amount_in)
             if approval_result is None:
@@ -716,31 +839,40 @@ class EthereumExecutor:
                 return {"success": False, "error": "approval failed"}
 
             # Calculate the minimum output we'll accept (slippage protection)
-            amount_out_min = self._get_amount_out_minimum(token_in, token_out, amount_in, fee)
+            first_hop_fee = route["hops"][0]["fee"]
+            amount_out_min = self._get_amount_out_minimum(
+                token_in, token_out, amount_in, first_hop_fee, route=route
+            )
 
             # Sanity check: amountOutMinimum must be > 0 or the swap is meaningless
             if amount_out_min <= 0:
                 logging.error(f"amountOutMinimum is {amount_out_min}, using 0 (no slippage protection)")
                 amount_out_min = 0
 
-            # Deadline: tx reverts if not mined within this window
-            deadline = int(time.time()) + TX_DEADLINE_SECONDS
-
             dec_in = self._get_decimals(token_in)
             dec_out = self._get_decimals(token_out)
             human_in = amount_in / (10 ** dec_in)
             human_out_min = amount_out_min / (10 ** dec_out) if amount_out_min > 0 else 0
-            logging.info(f"Swap: {human_in:.6f} -> min {human_out_min:.8f} (raw: {amount_in} -> {amount_out_min}), fee={fee}")
 
-            # Build the V3 path: tokenIn + fee(3 bytes big-endian) + tokenOut.
-            # This packed-bytes format encodes a single-hop route. For multi-hop
-            # (e.g. USDC→WETH→TOKEN), you'd chain more fee+token pairs: 43 + 23n bytes.
-            # The fee is a uint24 in hundredths of a basis point: 3000 = 0.30%.
-            path = (
-                bytes.fromhex(token_in[2:])
-                + int(fee).to_bytes(3, 'big')
-                + bytes.fromhex(token_out[2:])
-            )
+            # Build the V3 path based on route type
+            if route["type"] == "single":
+                hop = route["hops"][0]
+                path = (
+                    bytes.fromhex(hop["token_in"][2:])
+                    + int(hop["fee"]).to_bytes(3, 'big')
+                    + bytes.fromhex(hop["token_out"][2:])
+                )
+                logging.info(f"Swap (single-hop): {human_in:.6f} -> min {human_out_min:.8f} (raw: {amount_in} -> {amount_out_min}), fee={hop['fee']}")
+            else:
+                hops = route["hops"]
+                path = (
+                    bytes.fromhex(hops[0]["token_in"][2:])
+                    + int(hops[0]["fee"]).to_bytes(3, 'big')
+                    + bytes.fromhex(hops[0]["token_out"][2:])
+                    + int(hops[1]["fee"]).to_bytes(3, 'big')
+                    + bytes.fromhex(hops[1]["token_out"][2:])
+                )
+                logging.info(f"Swap (multi-hop): {human_in:.6f} -> min {human_out_min:.8f} (raw: {amount_in} -> {amount_out_min})")
 
             # exactInput params — web3.py ABI-encodes this 4-field struct into calldata
             # with the function selector 0xb858183f automatically.
@@ -812,7 +944,7 @@ class EthereumExecutor:
                 logging.error(
                     f"Swap reverted. Tx: {tx_hex} | "
                     f"Gas used: {gas_used}/500000 | "
-                    f"In={amount_in} OutMin={amount_out_min} Fee={fee} | "
+                    f"In={amount_in} OutMin={amount_out_min} Route={route['type']} | "
                     f"https://basescan.org/tx/{tx_hex}"
                 )
                 return {"success": False, "error": "transaction failed", "tx_hash": tx_hex}
@@ -868,11 +1000,8 @@ class EthereumExecutor:
                 token_in = token_addr
                 token_out = usdc_addr
 
-            # Look up fee tier from POOL_FEES
-            fee = POOL_FEES.get(product_id, 3000)
-
-            # Execute the on-chain swap
-            result = self.execute_swap(token_in, token_out, amount_in, self.account.address, fee=fee)
+            # Execute the on-chain swap (route is determined dynamically by execute_swap)
+            result = self.execute_swap(token_in, token_out, amount_in, self.account.address)
             return result
         else:
             logging.info(f"[PAPER] On-chain swap {side} {product_id}")
