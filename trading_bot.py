@@ -364,7 +364,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     short_limit = ex_value * SHORT_RISK_PERCENTAGE
     asset_candidates = []
     # Major assets supported
-    for asset in ["BTC", "ETH", "MATIC"]:
+    for asset in ["BTC", "ETH", "MATIC", "AVAX", "SUI"]:
         if is_asset_blacklisted(asset): continue
         product_id = get_data_product_id(asset)
         try:
@@ -392,7 +392,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
     # Short candidates in BEAR market (momentum is inverted for shorts)
     short_candidates = []
     if btc_trend == "BEAR":
-        for asset in ["BTC", "ETH", "MATIC"]:
+        for asset in ["BTC", "ETH", "MATIC", "AVAX", "SUI"]:
             if is_asset_blacklisted(asset): continue
             product_id = get_data_product_id(asset)
             try:
