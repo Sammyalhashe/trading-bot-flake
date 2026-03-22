@@ -1010,3 +1010,16 @@ class EthereumExecutor:
 
     def place_limit_order(self, product_id, side, price, amount_quote_currency=None, amount_base_currency=None):
         return self.place_market_order(product_id, side, amount_quote_currency, amount_base_currency)
+
+    def get_supported_assets(self):
+        """Return list of assets supported by this executor on Base."""
+        # Map TOKENS dict to asset symbols used in trading bot
+        assets = []
+        for symbol in TOKENS.keys():
+            if symbol in ("USDC", "USDC.e"):
+                continue  # cash, not tradable asset
+            if symbol == "WETH":
+                assets.append("ETH")
+            else:
+                assets.append(symbol)
+        return assets

@@ -220,3 +220,9 @@ class CoinbaseExecutor:
         if self.trading_mode == "live":
             return self.request("POST", "/api/v3/brokerage/orders", payload)
         return {"success": True, "order_id": order_id}
+
+    def get_supported_assets(self):
+        """Return list of assets supported by Coinbase for trading."""
+        # For now, return the fixed list used in the trading bot.
+        # In future, could fetch dynamically from Coinbase API.
+        return ["BTC", "ETH", "MATIC", "AVAX", "SUI"]
