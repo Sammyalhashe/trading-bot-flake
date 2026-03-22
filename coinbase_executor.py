@@ -225,4 +225,4 @@ class CoinbaseExecutor:
         """Return list of assets supported by Coinbase for trading."""
         # For now, return the fixed list used in the trading bot.
         # In future, could fetch dynamically from Coinbase API.
-        return ["BTC", "ETH", "MATIC", "AVAX", "SUI"]
+        return ["BTC", "ETH", "MATIC", "AVAX", "SUI", "SOL", "ADA", "DOGE", "XRP", "LINK"]

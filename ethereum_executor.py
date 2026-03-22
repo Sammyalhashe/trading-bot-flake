@@ -82,6 +82,10 @@ TOKENS = {
     "DEGEN": "0x4ed4E281562193f5C8c11259D3e21839951e7d23",
     "AERO": "0x9401811A062933285c64D72A25e8e3cf24f3fFBE",
     "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
+    "BRETT": "0x532f27101965dd16442e59d40670faf5ebb142e4",  # Brett meme coin
+    "TOSHI": "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4",  # Toshi cat meme coin
+    "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
+    "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
 }
 
 # Tokens to check during balance scan (minimal set to avoid rate limits)
@@ -140,6 +144,10 @@ KNOWN_DECIMALS = {
     "0x4ed4E281562193f5C8c11259D3e21839951e7d23": 18,   # DEGEN
     "0x9401811A062933285c64D72A25e8e3cf24f3fFBE": 18,   # AERO
     "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
+    "0x532f27101965dd16442e59d40670faf5ebb142e4": 18,   # BRETT
+    "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4": 18,   # TOSHI
+    "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
+    "0x6985884c4392d348587b19cb9eaaf157f13271cd": 18,   # ZRO
 }
 
 # Fallback RPC endpoints for Base
