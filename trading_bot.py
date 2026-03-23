@@ -67,8 +67,7 @@ logging.info(f"Bitcoin dominance tracking: {'ENABLED' if config.enable_btc_domin
 logging.info(f"Trading mode: {exec_config.trading_mode}")
 
 # Import specialized executors (after config loaded)
-from coinbase_executor import CoinbaseExecutor
-from ethereum_executor import EthereumExecutor
+from executors import CoinbaseExecutor, EthereumExecutor, validate_executor
 
 # Backward compatibility: expose config values as module-level constants
 # TODO: Remove these after refactoring is complete
@@ -666,8 +665,18 @@ def _run_bot(reset_to_usdc=False):
 
         if rpc_url and private_key:
             try:
-                active_executors.append(EthereumExecutor(rpc_url, private_key, TRADING_MODE))
+                eth_executor = EthereumExecutor(rpc_url, private_key, TRADING_MODE)
+                active_executors.append(eth_executor)
             except Exception as e: logging.error(f"Failed to init EthereumExecutor: {e}")
+
+    # Validate all executors implement required interface
+    for executor in active_executors:
+        try:
+            validate_executor(executor)
+            logging.info(f"✓ {executor.__class__.__name__} validated")
+        except TypeError as e:
+            logging.error(f"✗ Executor validation failed: {e}")
+            raise
 
     logging.info(f"--- 🤖 Crypto Bot Run ({TRADING_MODE.upper()}) ---")
     logging.info(f"[Risk] max_position=${MAX_POSITION_USD:,.0f} | max_drawdown={MAX_DRAWDOWN_PCT}% | min_order=${MIN_ORDER_USD:.0f}")

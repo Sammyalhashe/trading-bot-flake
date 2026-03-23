@@ -365,7 +365,7 @@ class TestConfigurablePaths:
 
 class TestCheckOrderFilled:
     def test_filled_order_returns_price(self):
-        from coinbase_executor import CoinbaseExecutor
+        from executors.coinbase_executor import CoinbaseExecutor
         with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
             executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
             executor.request = MagicMock(return_value={
@@ -379,7 +379,7 @@ class TestCheckOrderFilled:
             assert result == 50000.0
 
     def test_cancelled_order_returns_none(self):
-        from coinbase_executor import CoinbaseExecutor
+        from executors.coinbase_executor import CoinbaseExecutor
         with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
             executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
             executor.request = MagicMock(return_value={
@@ -389,7 +389,7 @@ class TestCheckOrderFilled:
             assert result is None
 
     def test_timeout_returns_none(self):
-        from coinbase_executor import CoinbaseExecutor
+        from executors.coinbase_executor import CoinbaseExecutor
         with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
             executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
             executor.request = MagicMock(return_value={
@@ -404,13 +404,13 @@ class TestCheckOrderFilled:
 class TestEthereumExecutor:
     def test_pol_not_in_tokens(self):
         """Verify POL placeholder was removed."""
-        from ethereum_executor import TOKENS
+        from executors.ethereum_executor import TOKENS
         assert "POL" not in TOKENS
 
     def test_execute_swap_default_fee_not_500(self):
         """Verify execute_swap no longer defaults to fee=500."""
         import inspect
-        from ethereum_executor import EthereumExecutor
+        from executors.ethereum_executor import EthereumExecutor
         sig = inspect.signature(EthereumExecutor.execute_swap)
         fee_param = sig.parameters.get('fee')
         assert fee_param is not None

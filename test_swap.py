@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO)
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ethereum_executor import EthereumExecutor
+from executors.ethereum_executor import EthereumExecutor
 
 # Environment variables
 rpc_url = os.environ.get('BASE_RPC_URL', 'https://mainnet.base.org')
