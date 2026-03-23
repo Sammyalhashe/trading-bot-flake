@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ethereum_executor import EthereumExecutor, TOKENS, POOL_FEES
+from executors.ethereum_executor import EthereumExecutor, TOKENS, POOL_FEES
 from web3 import Web3
 
 def main():

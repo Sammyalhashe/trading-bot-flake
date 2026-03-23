@@ -43,7 +43,7 @@ def test_executor_prices(product_ids=None):
     if product_ids is None:
         product_ids = ["BTC-USDC", "ETH-USDC", "LINK-USDC"]
 
-    from ethereum_executor import EthereumExecutor
+    from executors.ethereum_executor import EthereumExecutor
 
     # Paper mode with dummy key
     rpc_url = os.environ.get('BASE_RPC_URL', 'https://mainnet.base.org')
@@ -77,7 +77,7 @@ def test_executor_prices(product_ids=None):
 
 def test_pool_addresses():
     """Test pool address lookup"""
-    from ethereum_executor import POOLS
+    from executors.ethereum_executor import POOLS
 
     print("Configured pool addresses:")
     for product_id, pool_info in POOLS.items():
