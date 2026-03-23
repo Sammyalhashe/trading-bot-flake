@@ -12,6 +12,9 @@ import requests
 from pathlib import Path
 from decimal import Decimal
 
+# Import configuration
+from config import TradingConfig, ExecutorConfig
+
 # Graceful shutdown
 shutdown_requested = False
 def handle_shutdown(signum, frame):
@@ -21,96 +24,70 @@ def handle_shutdown(signum, frame):
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
-# Import specialized executors
-from coinbase_executor import CoinbaseExecutor
-from ethereum_executor import EthereumExecutor
+# Load and validate configuration
+config = TradingConfig.from_env()
+config.validate()
+
+exec_config = ExecutorConfig.from_env()
+exec_config.validate()
 
 # --- Logging Configuration ---
-_HOME = os.path.expanduser("~")
-LOG_FILE = os.environ.get("TRADING_LOG_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "trading.log"))
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+os.makedirs(os.path.dirname(exec_config.log_file), exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.FileHandler(exec_config.log_file),
         logging.StreamHandler(sys.stdout)
     ]
 )
 
-# --- Configuration ---
-API_JSON_FILE = os.environ.get("COINBASE_API_JSON", os.path.join(_HOME, "cdb_api_key.json"))
-STATE_FILE = Path(os.environ.get("TRADING_STATE_FILE", os.path.join(_HOME, "trading-bot-flake", "trading_state.json")))
-TRADING_MODE = os.environ.get("TRADING_MODE", "paper").lower()
+# Log configuration
+logging.info(f"Using {config.trend_asset} for market regime detection")
+logging.info(f"BTC bear-market exemption: {'ENABLED' if config.allow_btc_in_bear else 'DISABLED'}")
+logging.info(f"Dual-signal regime detection: {'ENABLED' if config.enable_dual_regime else 'DISABLED'}")
+logging.info(f"Bitcoin dominance tracking: {'ENABLED' if config.enable_btc_dominance else 'DISABLED'}")
+logging.info(f"Trading mode: {exec_config.trading_mode}")
 
-ENABLE_ETHEREUM = os.environ.get("ENABLE_ETHEREUM", "false").lower() == "true"
-ETH_RPC_URL = os.environ.get("ETH_RPC_URL")
-ETH_PRIVATE_KEY = os.environ.get("ETH_PRIVATE_KEY")
+# Import specialized executors (after config loaded)
+from coinbase_executor import CoinbaseExecutor
+from ethereum_executor import EthereumExecutor
 
-# Enable/disable short selling
-ENABLE_SHORT = os.environ.get("ENABLE_SHORT", "true").lower() == "true"
-
-# Strategy & Risk
-SHORT_WINDOW = 20
-LONG_WINDOW = 50
-PORTFOLIO_RISK_PERCENTAGE = float(os.environ.get("PORTFOLIO_RISK_PERCENTAGE", "0.15"))
-SHORT_RISK_PERCENTAGE = float(os.environ.get("SHORT_RISK_PERCENTAGE", "0.05"))  # 5% for shorts
-RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "0.95"))
+# Backward compatibility: expose config values as module-level constants
+# TODO: Remove these after refactoring is complete
+API_JSON_FILE = exec_config.api_json_file
+STATE_FILE = exec_config.state_file
+TRADING_MODE = exec_config.trading_mode
+ENABLE_ETHEREUM = exec_config.ethereum_enabled
+ETH_RPC_URL = exec_config.eth_rpc_url
+ETH_PRIVATE_KEY = exec_config.eth_private_key
+ENABLE_SHORT = config.enable_short
+SHORT_WINDOW = config.ma_short_window
+LONG_WINDOW = config.ma_long_window
+PORTFOLIO_RISK_PERCENTAGE = float(config.portfolio_risk_pct)
+SHORT_RISK_PERCENTAGE = float(config.short_risk_pct)
+RISK_PER_TRADE_PCT = float(config.risk_per_trade_pct)
 STOP_LOSS_PCT = 0.05  # Kept for backward compatibility reference
-
-# Dynamic Risk Limits
-MAX_POSITION_USD = float(os.environ.get("MAX_POSITION_USD", "5000"))
-MAX_DRAWDOWN_PCT = float(os.environ.get("MAX_DRAWDOWN_PCT", "10"))
-MIN_ORDER_USD = float(os.environ.get("MIN_ORDER_USD", "10"))
-ASSET_BLACKLIST = ["DOGE", "SHLD", "SHIB"]
-MOMENTUM_WINDOW_HOURS = 24
-TOP_MOMENTUM_COUNT = 3
-
-# Trailing Stop-Loss
-TRAILING_STOP_PCT = float(os.environ.get("TRAILING_STOP_PCT", "0.05"))
-
-# Volume & RSI Filters
-MIN_24H_VOLUME_USD = float(os.environ.get("MIN_24H_VOLUME_USD", "100000"))
-RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "70"))
-
-# Fee-aware P&L
-ROUND_TRIP_FEE_PCT = float(os.environ.get("ROUND_TRIP_FEE_PCT", "0.006"))
-
-# Take-Profit Levels
-# Trend Detection Switch: "BTC" or "ETH" (default: BTC)
-TREND_ASSET = os.environ.get("TREND_ASSET", "BTC").upper()
-if TREND_ASSET not in ["BTC", "ETH"]:
-    TREND_ASSET = "BTC"  # fallback to BTC if invalid
-logging.info(f"Using {TREND_ASSET} for market regime detection")
-
-# Hedging Strategy: Allow BTC purchases even in BEAR markets (default: true)
-# This treats BTC as a "safe haven" asset during market downturns
-ALLOW_BTC_IN_BEAR = os.environ.get("ALLOW_BTC_IN_BEAR", "true").lower() == "true"
-logging.info(f"BTC bear-market exemption: {'ENABLED' if ALLOW_BTC_IN_BEAR else 'DISABLED'}")
-
-# Dual-Signal Regime Detection: Use both BTC trend + ETH/BTC ratio (default: true)
-# When enabled, combines BTC macro trend with ETH/BTC ratio for 5-state regime
-# When disabled, falls back to single-asset TREND_ASSET behavior
-ENABLE_DUAL_REGIME = os.environ.get("ENABLE_DUAL_REGIME", "true").lower() == "true"
-logging.info(f"Dual-signal regime detection: {'ENABLED' if ENABLE_DUAL_REGIME else 'DISABLED'}")
-
-# Bitcoin Dominance: Fetch BTC dominance from CoinGecko as confirmation signal (default: false)
-# When enabled, BTC.D% is used to strengthen/weaken regime confidence
-# Requires internet access to CoinGecko API (free, no auth needed)
-ENABLE_BTC_DOMINANCE = os.environ.get("ENABLE_BTC_DOMINANCE", "false").lower() == "true"
-logging.info(f"Bitcoin dominance tracking: {'ENABLED' if ENABLE_BTC_DOMINANCE else 'DISABLED'}")
-
-TAKE_PROFIT_1_PCT = float(os.environ.get("TAKE_PROFIT_1_PCT", "0.10"))
-TAKE_PROFIT_1_SELL_RATIO = float(os.environ.get("TAKE_PROFIT_1_SELL_RATIO", "0.33"))
-TAKE_PROFIT_2_PCT = float(os.environ.get("TAKE_PROFIT_2_PCT", "0.20"))
-TAKE_PROFIT_2_SELL_RATIO = float(os.environ.get("TAKE_PROFIT_2_SELL_RATIO", "0.50"))
-
-ASSET_MAPPING = {
-    "MATIC": "POL",      # MATIC rebranded to POL on Coinbase
-    "ETH_NATIVE": "ETH", # For pricing native ETH
-    "USDC.e": "USDC",    # For pricing bridged USDC
-}
+MAX_POSITION_USD = float(config.max_position_usd)
+MAX_DRAWDOWN_PCT = float(config.max_drawdown_pct)
+MIN_ORDER_USD = float(config.min_order_usd)
+ASSET_BLACKLIST = config.asset_blacklist
+MOMENTUM_WINDOW_HOURS = config.momentum_window_hours
+TOP_MOMENTUM_COUNT = config.top_momentum_count
+TRAILING_STOP_PCT = float(config.trailing_stop_pct)
+MIN_24H_VOLUME_USD = float(config.min_24h_volume_usd)
+RSI_OVERBOUGHT = float(config.rsi_overbought)
+ROUND_TRIP_FEE_PCT = float(config.round_trip_fee_pct)
+TREND_ASSET = config.trend_asset
+ALLOW_BTC_IN_BEAR = config.allow_btc_in_bear
+ENABLE_DUAL_REGIME = config.enable_dual_regime
+ENABLE_BTC_DOMINANCE = config.enable_btc_dominance
+TAKE_PROFIT_1_PCT = float(config.take_profit_1_pct)
+TAKE_PROFIT_1_SELL_RATIO = float(config.take_profit_1_sell_ratio)
+TAKE_PROFIT_2_PCT = float(config.take_profit_2_pct)
+TAKE_PROFIT_2_SELL_RATIO = float(config.take_profit_2_sell_ratio)
+ASSET_MAPPING = config.asset_mapping
 
 # --- Helpers ---
 def get_data_product_id(asset):
@@ -123,7 +100,7 @@ def round_to_increment(amount, increment):
     return (amt // inc) * inc
 
 # --- Process-level lock (prevents overlapping runs from systemd timer) ---
-_RUN_LOCK_FILE = STATE_FILE.with_suffix('.runlock')
+_RUN_LOCK_FILE = exec_config.state_file.with_suffix('.runlock')
 _run_lock_fd = None
 
 def acquire_run_lock():
