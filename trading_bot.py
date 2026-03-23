@@ -15,6 +15,9 @@ from decimal import Decimal
 # Import configuration
 from config import TradingConfig, ExecutorConfig
 
+# Import core business logic
+from core import StateManager, TechnicalAnalysis, RegimeDetector
+
 # Graceful shutdown
 shutdown_requested = False
 def handle_shutdown(signum, frame):
@@ -30,6 +33,19 @@ config.validate()
 
 exec_config = ExecutorConfig.from_env()
 exec_config.validate()
+
+# Initialize core components
+state_manager = StateManager(exec_config.state_file)
+technical_analysis = TechnicalAnalysis(
+    ma_short_window=config.ma_short_window,
+    ma_long_window=config.ma_long_window
+)
+regime_detector = RegimeDetector(
+    technical_analysis=technical_analysis,
+    ma_short_window=config.ma_short_window,
+    ma_long_window=config.ma_long_window,
+    enable_btc_dominance=config.enable_btc_dominance
+)
 
 # --- Logging Configuration ---
 os.makedirs(os.path.dirname(exec_config.log_file), exist_ok=True)
@@ -129,354 +145,116 @@ def release_run_lock():
             pass
         _run_lock_fd = None
 
-# --- State Management ---
-_STATE_LOCK_FILE = STATE_FILE.with_suffix('.lock')
-
-def _acquire_state_lock():
-    """Acquire file lock for state access. Returns lock file handle."""
-    os.makedirs(os.path.dirname(_STATE_LOCK_FILE), exist_ok=True)
-    lock_fd = open(_STATE_LOCK_FILE, 'w')
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-    return lock_fd
-
-def _release_state_lock(lock_fd):
-    """Release file lock for state access."""
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
-    except Exception:
-        pass
-
+# --- State Management (wrappers for backward compatibility) ---
 def load_state():
-    default_state = {"entry_prices": {}, "high_water_marks": {}, "take_profit_flags": {}}
-    lock_fd = _acquire_state_lock()
-    try:
-        if STATE_FILE.exists():
-            try:
-                with open(STATE_FILE, 'r') as f:
-                    state = json.load(f)
-                state.setdefault("entry_prices", {})
-                state.setdefault("high_water_marks", {})
-                state.setdefault("take_profit_flags", {})
-                return state
-            except Exception as e:
-                logging.error(f"Failed to load state: {e}")
-                return default_state
-        return default_state
-    finally:
-        _release_state_lock(lock_fd)
+    """Wrapper for backward compatibility"""
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.load_state()
 
 def save_state(state):
-    lock_fd = _acquire_state_lock()
-    try:
-        tmp = STATE_FILE.with_suffix('.tmp')
-        with open(tmp, 'w') as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        logging.error(f"Failed to save state: {e}")
-    finally:
-        _release_state_lock(lock_fd)
+    """Wrapper for backward compatibility"""
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.save_state(state)
 
 def update_entry_price(executor_id, product_id, price):
-    state = load_state()
-    key = f"{executor_id}:{product_id}"
-    state.setdefault("entry_prices", {})[key] = price
-    # Initialize high water mark to entry price
-    state.setdefault("high_water_marks", {})[key] = price
-    # Reset take-profit flags for new entry
-    state.setdefault("take_profit_flags", {})[key] = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
-    save_state(state)
+    """Wrapper for backward compatibility"""
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.update_entry_price(executor_id, product_id, price)
 
 def clear_entry_price(executor_id, product_id):
-    state = load_state()
-    key = f"{executor_id}:{product_id}"
-    if key in state.get("entry_prices", {}):
-        del state["entry_prices"][key]
-    # Also clear high water mark
-    if key in state.get("high_water_marks", {}):
-        del state["high_water_marks"][key]
-    # Also clear take-profit flags
-    if key in state.get("take_profit_flags", {}):
-        del state["take_profit_flags"][key]
-    save_state(state)
+    """Wrapper for backward compatibility"""
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.clear_entry_price(executor_id, product_id)
 
 def load_peak_value(executor_id="default"):
-    state = load_state()
-    peaks = state.get("peak_portfolio_values", {})
-    return peaks.get(executor_id, 0.0)
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.load_peak_value(executor_id)
 
 def save_peak_value(value, executor_id="default"):
-    state = load_state()
-    peaks = state.setdefault("peak_portfolio_values", {})
-    peaks[executor_id] = value
-    save_state(state)
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.save_peak_value(value, executor_id)
 
 def record_trade(is_win, pnl):
-    state = load_state()
-    perf = state.setdefault("performance", {"total_trades": 0, "winning_trades": 0, "losing_trades": 0, "total_pnl": 0.0, "run_count": 0})
-    perf["total_trades"] += 1
-    if is_win:
-        perf["winning_trades"] += 1
-    else:
-        perf["losing_trades"] += 1
-    perf["total_pnl"] += pnl
-    perf["last_run_time"] = datetime.datetime.now().isoformat()
-    save_state(state)
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.record_trade(is_win, pnl)
 
 def increment_run_count():
-    state = load_state()
-    perf = state.setdefault("performance", {"total_trades": 0, "winning_trades": 0, "losing_trades": 0, "total_pnl": 0.0, "run_count": 0})
-    perf["run_count"] += 1
-    perf["last_run_time"] = datetime.datetime.now().isoformat()
-    save_state(state)
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.increment_run_count()
 
 def get_performance():
-    state = load_state()
-    return state.get("performance", {"total_trades": 0, "winning_trades": 0, "losing_trades": 0, "total_pnl": 0.0, "run_count": 0})
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.get_performance()
 
 def log_performance_summary():
-    perf = get_performance()
-    total = perf.get("total_trades", 0)
-    wins = perf.get("winning_trades", 0)
-    win_rate = (wins / total * 100) if total > 0 else 0
-    logging.info(f"[Performance] Trades: {total} | Wins: {wins} ({win_rate:.0f}%) | Total PnL: ${perf.get('total_pnl', 0):+.2f}")
+    """Wrapper for backward compatibility"""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.log_performance_summary()
 
 def is_asset_blacklisted(asset):
     return asset.upper() in [a.upper() for a in ASSET_BLACKLIST]
 
-# --- Strategy Logic ---
+# --- Strategy Logic (wrappers for backward compatibility) ---
 def analyze_trend(df):
-    """Compute short and long moving averages for trend detection.
-
-    The bot uses MA crossover to determine market direction:
-      - short_MA > long_MA * 1.002 → uptrend (BUY signal, 0.2% buffer avoids noise)
-      - short_MA < long_MA * 0.998 → downtrend (SELL/SHORT signal)
-    The 0.2% buffer prevents whipsawing on flat markets.
-    """
-    if df is None or len(df) < LONG_WINDOW: return None, None
-    s_ma = df['close'].rolling(window=SHORT_WINDOW).mean().iloc[-1]
-    l_ma = df['close'].rolling(window=LONG_WINDOW).mean().iloc[-1]
-    return s_ma, l_ma
+    """Wrapper for backward compatibility"""
+    return technical_analysis.analyze_trend(df)
 
 def compute_eth_btc_ratio(data_provider):
-    """Compute ETH/BTC ratio trend to detect altcoin rotation.
-
-    The ETH/BTC ratio indicates whether capital is rotating into altcoins (ETH leading)
-    or consolidating into BTC (BTC leading). This is a critical signal for altcoin seasons.
-
-    Returns:
-        str: "ETH_LEADING", "BTC_LEADING", or "NEUTRAL_RATIO"
-        None: if insufficient data
-    """
-    try:
-        # Fetch both pairs
-        eth_df = data_provider.get_market_data("ETH-USDC", LONG_WINDOW)
-        btc_df = data_provider.get_market_data("BTC-USDC", LONG_WINDOW)
-
-        if eth_df is None or btc_df is None:
-            logging.warning("ETH/BTC ratio: Missing data for one or both pairs")
-            return None
-
-        if len(eth_df) < LONG_WINDOW or len(btc_df) < LONG_WINDOW:
-            logging.warning(f"ETH/BTC ratio: Insufficient data (ETH:{len(eth_df)}, BTC:{len(btc_df)})")
-            return None
-
-        # Merge on timestamp to align candles
-        merged = pd.merge(
-            eth_df[['start', 'close']].rename(columns={'close': 'eth_close'}),
-            btc_df[['start', 'close']].rename(columns={'close': 'btc_close'}),
-            on='start',
-            how='inner'
-        )
-
-        if len(merged) < LONG_WINDOW:
-            logging.warning(f"ETH/BTC ratio: Insufficient aligned data ({len(merged)} rows after merge)")
-            return None
-
-        # Calculate ratio
-        merged['eth_btc_ratio'] = merged['eth_close'] / merged['btc_close']
-
-        # Apply SMA analysis
-        ratio_sma_short = merged['eth_btc_ratio'].rolling(window=SHORT_WINDOW).mean().iloc[-1]
-        ratio_sma_long = merged['eth_btc_ratio'].rolling(window=LONG_WINDOW).mean().iloc[-1]
-
-        # Use 0.3% buffer (wider than 0.2%) because ratio is noisier
-        if ratio_sma_short > ratio_sma_long * 1.003:
-            signal = "ETH_LEADING"  # ETH outperforming BTC → altcoin rotation
-        elif ratio_sma_short < ratio_sma_long * 0.997:
-            signal = "BTC_LEADING"  # BTC outperforming ETH → capital consolidating
-        else:
-            signal = "NEUTRAL_RATIO"  # No clear rotation
-
-        ratio_current = merged['eth_btc_ratio'].iloc[-1]
-        logging.info(f"ETH/BTC Ratio: {ratio_current:.5f} | Signal: {signal}")
-        return signal
-
-    except Exception as e:
-        logging.error(f"ETH/BTC ratio computation failed: {e}")
-        return None
+    """Wrapper for backward compatibility"""
+    return regime_detector.compute_eth_btc_ratio(data_provider)
 
 def resolve_regime(btc_macro, rotation_signal, btc_dominance=None):
-    """Combine BTC trend and ETH/BTC rotation into a composite 5-state regime.
-
-    Args:
-        btc_macro (str): "BULL", "BEAR", or "FLAT"
-        rotation_signal (str): "ETH_LEADING", "BTC_LEADING", or "NEUTRAL_RATIO"
-        btc_dominance (dict, optional): {"btc_dominance": float, "regime": str} from CoinGecko
-
-    Returns:
-        str: One of "STRONG_BULL", "BULL", "NEUTRAL", "BEAR", "STRONG_BEAR"
-
-    Regime meanings:
-        STRONG_BULL: BTC uptrend + alts leading → aggressive longs on alts
-        BULL: BTC uptrend + BTC leading → conservative longs, prefer BTC
-        NEUTRAL: BTC flat or mixed signals → minimal new positions
-        BEAR: BTC downtrend + BTC leading → shorts on alts, defensive
-        STRONG_BEAR: BTC downtrend + alts dumping faster → high risk, cash heavy
-    """
-    # Primary axis: BTC macro trend
-    if btc_macro == "BULL":
-        if rotation_signal == "ETH_LEADING":
-            regime = "STRONG_BULL"
-        elif rotation_signal == "BTC_LEADING":
-            regime = "BULL"
-        else:  # NEUTRAL_RATIO
-            regime = "BULL"
-
-    elif btc_macro == "BEAR":
-        if rotation_signal == "BTC_LEADING":
-            regime = "BEAR"
-        elif rotation_signal == "ETH_LEADING":
-            regime = "STRONG_BEAR"
-        else:  # NEUTRAL_RATIO
-            regime = "BEAR"
-
-    else:  # FLAT
-        regime = "NEUTRAL"
-
-    # Optional: BTC dominance can strengthen/weaken confidence (Phase 3 enhancement)
-    # For now, we just pass it through without modifying the regime
-    if btc_dominance:
-        logging.info(f"BTC Dominance: {btc_dominance.get('btc_dominance', 'N/A')}% ({btc_dominance.get('regime', 'N/A')})")
-
-    return regime
+    """Wrapper for backward compatibility"""
+    return regime_detector.resolve_regime(btc_macro, rotation_signal, btc_dominance)
 
 def regime_to_legacy(regime):
-    """Map 5-state regime to legacy binary BULL/BEAR for backward compatibility.
-
-    This allows existing strategy code to work unchanged during migration.
-    """
-    if regime in ("STRONG_BULL", "BULL"):
-        return "BULL"
-    elif regime in ("STRONG_BEAR", "BEAR"):
-        return "BEAR"
-    else:  # NEUTRAL
-        return "BULL"  # Conservative: default to allowing longs, no shorts
+    """Wrapper for backward compatibility"""
+    return regime_detector.regime_to_legacy(regime)
 
 def get_btc_dominance():
-    """Fetch Bitcoin dominance from CoinGecko API.
-
-    Bitcoin dominance (BTC.D) is the percentage of total crypto market cap that Bitcoin represents.
-    High dominance (>55%) = capital consolidating in BTC (risk-off for alts)
-    Low dominance (<45%) = capital flowing to alts (alt season)
-
-    Returns:
-        dict: {"btc_dominance": float, "regime": str} where regime is "BTC_DOMINANT", "ALT_SEASON", or "NEUTRAL"
-        None: if API call fails or is unavailable
-    """
-    try:
-        url = "https://api.coingecko.com/api/v3/global"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-
-        data = response.json()["data"]
-        btc_d = data["market_cap_percentage"]["btc"]
-        total_mcap = data["total_market_cap"]["usd"]
-
-        # Classify dominance regime
-        if btc_d > 55:
-            regime = "BTC_DOMINANT"  # Reduce alt exposure, favor BTC
-        elif btc_d < 45:
-            regime = "ALT_SEASON"    # Increase alt exposure
-        else:
-            regime = "NEUTRAL"
-
-        logging.info(f"BTC Dominance: {btc_d:.2f}% (Total Market Cap: ${total_mcap/1e9:.1f}B) → {regime}")
-
-        return {
-            "btc_dominance": btc_d,
-            "regime": regime,
-            "total_market_cap_usd": total_mcap
-        }
-
-    except requests.exceptions.Timeout:
-        logging.warning("BTC dominance fetch timed out (CoinGecko API)")
-        return None
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"BTC dominance fetch failed: {e}")
-        return None
-    except (KeyError, ValueError) as e:
-        logging.error(f"BTC dominance parsing error: {e}")
-        return None
+    """Wrapper for backward compatibility"""
+    return regime_detector.get_btc_dominance()
 
 def calculate_rsi(df, period=14):
-    """Calculate RSI (Relative Strength Index) from candle close prices.
-
-    RSI measures momentum on a 0–100 scale:
-      - RSI > 70 → overbought (price rose too fast, likely to pull back)
-      - RSI < 30 → oversold  (price dropped too fast, likely to bounce)
-
-    Formula:
-      RS  = avg_gain / avg_loss   (over `period` bars)
-      RSI = 100 - 100/(1 + RS)
-
-    When gains dominate, RS is large → RSI approaches 100.
-    When losses dominate, RS is small → RSI approaches 0.
-    """
-    if df is None or len(df) < period + 1:
-        return None
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
+    """Wrapper for backward compatibility"""
+    return technical_analysis.calculate_rsi(df, period)
 
 def calculate_atr(df, period=14):
-    """Calculate ATR (Average True Range) from candle OHLC data.
-
-    ATR measures volatility — the average size of recent price swings.
-    Used to set trailing stops that adapt to current market conditions:
-      - High ATR → wider stop (volatile market, avoid getting stopped out by noise)
-      - Low ATR  → tighter stop (calm market, protect gains more aggressively)
-
-    True Range for each bar is the largest of:
-      1. high - low                (intra-bar range)
-      2. |high - previous close|   (gap up)
-      3. |low  - previous close|   (gap down)
-
-    ATR = simple moving average of True Range over `period` bars.
-    """
-    if df is None or len(df) < period + 1:
-        return None
-    high = df['high']
-    low = df['low']
-    prev_close = df['close'].shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean().iloc[-1]
-    return atr
+    """Wrapper for backward compatibility"""
+    return technical_analysis.calculate_atr(df, period)
 
 def get_momentum_ranking(df):
-    if df is None or len(df) < MOMENTUM_WINDOW_HOURS + 1: return 0.0
-    curr = df['close'].iloc[-1]
-    hist = df['close'].iloc[-(MOMENTUM_WINDOW_HOURS + 1)]
-    return ((curr - hist) / hist) * 100 if hist != 0 else 0.0
+    """Wrapper for backward compatibility"""
+    return technical_analysis.get_momentum_ranking(df, MOMENTUM_WINDOW_HOURS)
 
 def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=False):
     ex_id = executor.__class__.__name__
