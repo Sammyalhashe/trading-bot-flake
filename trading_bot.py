@@ -8,6 +8,7 @@ import logging
 import sys
 import signal
 import fcntl
+import requests
 from pathlib import Path
 from decimal import Decimal
 
@@ -82,6 +83,24 @@ TREND_ASSET = os.environ.get("TREND_ASSET", "BTC").upper()
 if TREND_ASSET not in ["BTC", "ETH"]:
     TREND_ASSET = "BTC"  # fallback to BTC if invalid
 logging.info(f"Using {TREND_ASSET} for market regime detection")
+
+# Hedging Strategy: Allow BTC purchases even in BEAR markets (default: true)
+# This treats BTC as a "safe haven" asset during market downturns
+ALLOW_BTC_IN_BEAR = os.environ.get("ALLOW_BTC_IN_BEAR", "true").lower() == "true"
+logging.info(f"BTC bear-market exemption: {'ENABLED' if ALLOW_BTC_IN_BEAR else 'DISABLED'}")
+
+# Dual-Signal Regime Detection: Use both BTC trend + ETH/BTC ratio (default: true)
+# When enabled, combines BTC macro trend with ETH/BTC ratio for 5-state regime
+# When disabled, falls back to single-asset TREND_ASSET behavior
+ENABLE_DUAL_REGIME = os.environ.get("ENABLE_DUAL_REGIME", "true").lower() == "true"
+logging.info(f"Dual-signal regime detection: {'ENABLED' if ENABLE_DUAL_REGIME else 'DISABLED'}")
+
+# Bitcoin Dominance: Fetch BTC dominance from CoinGecko as confirmation signal (default: false)
+# When enabled, BTC.D% is used to strengthen/weaken regime confidence
+# Requires internet access to CoinGecko API (free, no auth needed)
+ENABLE_BTC_DOMINANCE = os.environ.get("ENABLE_BTC_DOMINANCE", "false").lower() == "true"
+logging.info(f"Bitcoin dominance tracking: {'ENABLED' if ENABLE_BTC_DOMINANCE else 'DISABLED'}")
+
 TAKE_PROFIT_1_PCT = float(os.environ.get("TAKE_PROFIT_1_PCT", "0.10"))
 TAKE_PROFIT_1_SELL_RATIO = float(os.environ.get("TAKE_PROFIT_1_SELL_RATIO", "0.33"))
 TAKE_PROFIT_2_PCT = float(os.environ.get("TAKE_PROFIT_2_PCT", "0.20"))
@@ -263,6 +282,167 @@ def analyze_trend(df):
     l_ma = df['close'].rolling(window=LONG_WINDOW).mean().iloc[-1]
     return s_ma, l_ma
 
+def compute_eth_btc_ratio(data_provider):
+    """Compute ETH/BTC ratio trend to detect altcoin rotation.
+
+    The ETH/BTC ratio indicates whether capital is rotating into altcoins (ETH leading)
+    or consolidating into BTC (BTC leading). This is a critical signal for altcoin seasons.
+
+    Returns:
+        str: "ETH_LEADING", "BTC_LEADING", or "NEUTRAL_RATIO"
+        None: if insufficient data
+    """
+    try:
+        # Fetch both pairs
+        eth_df = data_provider.get_market_data("ETH-USDC", LONG_WINDOW)
+        btc_df = data_provider.get_market_data("BTC-USDC", LONG_WINDOW)
+
+        if eth_df is None or btc_df is None:
+            logging.warning("ETH/BTC ratio: Missing data for one or both pairs")
+            return None
+
+        if len(eth_df) < LONG_WINDOW or len(btc_df) < LONG_WINDOW:
+            logging.warning(f"ETH/BTC ratio: Insufficient data (ETH:{len(eth_df)}, BTC:{len(btc_df)})")
+            return None
+
+        # Merge on timestamp to align candles
+        merged = pd.merge(
+            eth_df[['start', 'close']].rename(columns={'close': 'eth_close'}),
+            btc_df[['start', 'close']].rename(columns={'close': 'btc_close'}),
+            on='start',
+            how='inner'
+        )
+
+        if len(merged) < LONG_WINDOW:
+            logging.warning(f"ETH/BTC ratio: Insufficient aligned data ({len(merged)} rows after merge)")
+            return None
+
+        # Calculate ratio
+        merged['eth_btc_ratio'] = merged['eth_close'] / merged['btc_close']
+
+        # Apply SMA analysis
+        ratio_sma_short = merged['eth_btc_ratio'].rolling(window=SHORT_WINDOW).mean().iloc[-1]
+        ratio_sma_long = merged['eth_btc_ratio'].rolling(window=LONG_WINDOW).mean().iloc[-1]
+
+        # Use 0.3% buffer (wider than 0.2%) because ratio is noisier
+        if ratio_sma_short > ratio_sma_long * 1.003:
+            signal = "ETH_LEADING"  # ETH outperforming BTC → altcoin rotation
+        elif ratio_sma_short < ratio_sma_long * 0.997:
+            signal = "BTC_LEADING"  # BTC outperforming ETH → capital consolidating
+        else:
+            signal = "NEUTRAL_RATIO"  # No clear rotation
+
+        ratio_current = merged['eth_btc_ratio'].iloc[-1]
+        logging.info(f"ETH/BTC Ratio: {ratio_current:.5f} | Signal: {signal}")
+        return signal
+
+    except Exception as e:
+        logging.error(f"ETH/BTC ratio computation failed: {e}")
+        return None
+
+def resolve_regime(btc_macro, rotation_signal, btc_dominance=None):
+    """Combine BTC trend and ETH/BTC rotation into a composite 5-state regime.
+
+    Args:
+        btc_macro (str): "BULL", "BEAR", or "FLAT"
+        rotation_signal (str): "ETH_LEADING", "BTC_LEADING", or "NEUTRAL_RATIO"
+        btc_dominance (dict, optional): {"btc_dominance": float, "regime": str} from CoinGecko
+
+    Returns:
+        str: One of "STRONG_BULL", "BULL", "NEUTRAL", "BEAR", "STRONG_BEAR"
+
+    Regime meanings:
+        STRONG_BULL: BTC uptrend + alts leading → aggressive longs on alts
+        BULL: BTC uptrend + BTC leading → conservative longs, prefer BTC
+        NEUTRAL: BTC flat or mixed signals → minimal new positions
+        BEAR: BTC downtrend + BTC leading → shorts on alts, defensive
+        STRONG_BEAR: BTC downtrend + alts dumping faster → high risk, cash heavy
+    """
+    # Primary axis: BTC macro trend
+    if btc_macro == "BULL":
+        if rotation_signal == "ETH_LEADING":
+            regime = "STRONG_BULL"
+        elif rotation_signal == "BTC_LEADING":
+            regime = "BULL"
+        else:  # NEUTRAL_RATIO
+            regime = "BULL"
+
+    elif btc_macro == "BEAR":
+        if rotation_signal == "BTC_LEADING":
+            regime = "BEAR"
+        elif rotation_signal == "ETH_LEADING":
+            regime = "STRONG_BEAR"
+        else:  # NEUTRAL_RATIO
+            regime = "BEAR"
+
+    else:  # FLAT
+        regime = "NEUTRAL"
+
+    # Optional: BTC dominance can strengthen/weaken confidence (Phase 3 enhancement)
+    # For now, we just pass it through without modifying the regime
+    if btc_dominance:
+        logging.info(f"BTC Dominance: {btc_dominance.get('btc_dominance', 'N/A')}% ({btc_dominance.get('regime', 'N/A')})")
+
+    return regime
+
+def regime_to_legacy(regime):
+    """Map 5-state regime to legacy binary BULL/BEAR for backward compatibility.
+
+    This allows existing strategy code to work unchanged during migration.
+    """
+    if regime in ("STRONG_BULL", "BULL"):
+        return "BULL"
+    elif regime in ("STRONG_BEAR", "BEAR"):
+        return "BEAR"
+    else:  # NEUTRAL
+        return "BULL"  # Conservative: default to allowing longs, no shorts
+
+def get_btc_dominance():
+    """Fetch Bitcoin dominance from CoinGecko API.
+
+    Bitcoin dominance (BTC.D) is the percentage of total crypto market cap that Bitcoin represents.
+    High dominance (>55%) = capital consolidating in BTC (risk-off for alts)
+    Low dominance (<45%) = capital flowing to alts (alt season)
+
+    Returns:
+        dict: {"btc_dominance": float, "regime": str} where regime is "BTC_DOMINANT", "ALT_SEASON", or "NEUTRAL"
+        None: if API call fails or is unavailable
+    """
+    try:
+        url = "https://api.coingecko.com/api/v3/global"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()["data"]
+        btc_d = data["market_cap_percentage"]["btc"]
+        total_mcap = data["total_market_cap"]["usd"]
+
+        # Classify dominance regime
+        if btc_d > 55:
+            regime = "BTC_DOMINANT"  # Reduce alt exposure, favor BTC
+        elif btc_d < 45:
+            regime = "ALT_SEASON"    # Increase alt exposure
+        else:
+            regime = "NEUTRAL"
+
+        logging.info(f"BTC Dominance: {btc_d:.2f}% (Total Market Cap: ${total_mcap/1e9:.1f}B) → {regime}")
+
+        return {
+            "btc_dominance": btc_d,
+            "regime": regime,
+            "total_market_cap_usd": total_mcap
+        }
+
+    except requests.exceptions.Timeout:
+        logging.warning("BTC dominance fetch timed out (CoinGecko API)")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"BTC dominance fetch failed: {e}")
+        return None
+    except (KeyError, ValueError) as e:
+        logging.error(f"BTC dominance parsing error: {e}")
+        return None
+
 def calculate_rsi(df, period=14):
     """Calculate RSI (Relative Strength Index) from candle close prices.
 
@@ -321,7 +501,7 @@ def get_momentum_ranking(df):
     hist = df['close'].iloc[-(MOMENTUM_WINDOW_HOURS + 1)]
     return ((curr - hist) / hist) * 100 if hist != 0 else 0.0
 
-def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=False):
+def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=False):
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
@@ -376,7 +556,12 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
         try:
             df = data_provider.get_market_data(product_id, LONG_WINDOW)
             ma_s, ma_l = analyze_trend(df)
-            if ma_s and ma_l and ma_s > ma_l * 1.002 and (btc_trend == "BULL" or asset == "BTC"):
+            # BTC exemption: allow BTC buys in BEAR if ALLOW_BTC_IN_BEAR is enabled (hedging strategy)
+            allow_buy = market_regime == "BULL" or (ALLOW_BTC_IN_BEAR and asset == "BTC")
+            if ma_s and ma_l and ma_s > ma_l * 1.002 and allow_buy:
+                # Log when BTC bear-market exemption is triggered
+                if market_regime == "BEAR" and asset == "BTC" and ALLOW_BTC_IN_BEAR:
+                    logging.info(f"[{ex_id}] BTC bear-market exemption triggered (hedging strategy)")
                 # Volume filter: check 24h USD volume
                 if df is not None and len(df) >= 24:
                     volume_24h = df['volume'].iloc[-24:].sum()
@@ -397,7 +582,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
 
     # Short candidates in BEAR market (momentum is inverted for shorts)
     short_candidates = []
-    if btc_trend == "BEAR":
+    if market_regime == "BEAR":
         for asset in supported_assets:
             if is_asset_blacklisted(asset): continue
             product_id = get_data_product_id(asset)
@@ -440,7 +625,7 @@ def run_executor_strategy(executor, data_provider, btc_trend, reset_to_usdc=Fals
                     logging.info(f"[{ex_id}] Skipping {asset}: position at ${current_asset_value:,.0f} already at/exceeds MAX_POSITION_USD (${MAX_POSITION_USD:,.0f})")
                     continue
                 logging.info(f"[{ex_id}] Capped {asset} buy to ${buy_size:,.2f} to stay within MAX_POSITION_USD")
-            if drawdown_pct >= MAX_DRAWDOWN_PCT and btc_trend == "BULL":
+            if drawdown_pct >= MAX_DRAWDOWN_PCT and market_regime == "BULL":
                 continue  # Skip long buys during drawdown
             if buy_size > MIN_ORDER_USD:
                 result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size)
@@ -735,17 +920,71 @@ def _run_bot(reset_to_usdc=False):
     logging.info(f"Trailing Stop: {TRAILING_STOP_PCT*100:.1f}% | TP1: {TAKE_PROFIT_1_PCT*100:.1f}% ({TAKE_PROFIT_1_SELL_RATIO*100:.0f}% sell) | TP2: {TAKE_PROFIT_2_PCT*100:.1f}% ({TAKE_PROFIT_2_SELL_RATIO*100:.0f}% sell)")
     data_provider = cb_executor
 
-    # Global Trend
-    trend_product = get_data_product_id(TREND_ASSET)
-    trend_df = data_provider.get_market_data(trend_product, LONG_WINDOW)
-    trend_s, trend_l = analyze_trend(trend_df)
-    btc_trend = "BEAR" if trend_s and trend_l and trend_s < trend_l else "BULL"
-    logging.info(f"Market Regime ({TREND_ASSET}): {btc_trend}")
+    # Global Trend Detection
+    if ENABLE_DUAL_REGIME:
+        # Dual-signal regime: BTC macro + ETH/BTC ratio → 5-state regime
+        logging.info("Computing dual-signal market regime...")
+
+        # 1. BTC Macro Trend
+        btc_product = get_data_product_id("BTC")
+        btc_df = data_provider.get_market_data(btc_product, LONG_WINDOW)
+        btc_s, btc_l = analyze_trend(btc_df)
+
+        if btc_s and btc_l:
+            if btc_s > btc_l * 1.002:
+                btc_macro = "BULL"
+            elif btc_s < btc_l * 0.998:
+                btc_macro = "BEAR"
+            else:
+                btc_macro = "FLAT"
+        else:
+            btc_macro = "BULL"  # Default when insufficient data
+
+        # 2. ETH/BTC Rotation Signal
+        rotation_signal = compute_eth_btc_ratio(data_provider)
+        if rotation_signal is None:
+            logging.warning("ETH/BTC ratio unavailable, falling back to BTC-only regime")
+            rotation_signal = "NEUTRAL_RATIO"
+
+        # 2.5. Bitcoin Dominance (optional)
+        btc_dominance = None
+        if ENABLE_BTC_DOMINANCE:
+            btc_dominance = get_btc_dominance()
+            if btc_dominance is None:
+                logging.info("BTC dominance unavailable, continuing without it")
+
+        # 3. Resolve Composite Regime
+        full_regime = resolve_regime(btc_macro, rotation_signal, btc_dominance)
+
+        # 4. Map to legacy BULL/BEAR for backward compatibility
+        market_regime = regime_to_legacy(full_regime)
+
+        logging.info(f"Market Regime: {full_regime} (BTC: {btc_macro} | Rotation: {rotation_signal})")
+        logging.info(f"Legacy regime (passed to strategy): {market_regime}")
+
+    else:
+        # Single-asset regime (legacy behavior)
+        trend_product = get_data_product_id(TREND_ASSET)
+        trend_df = data_provider.get_market_data(trend_product, LONG_WINDOW)
+        trend_s, trend_l = analyze_trend(trend_df)
+
+        if trend_s and trend_l:
+            if trend_s > trend_l * 1.002:
+                market_regime = "BULL"
+            elif trend_s < trend_l * 0.998:
+                market_regime = "BEAR"
+            else:
+                market_regime = "BULL"  # Neutral zone defaults to BULL
+        else:
+            market_regime = "BULL"  # Default when insufficient data
+
+        full_regime = market_regime  # Same as market_regime in single-asset mode
+        logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
 
     aggregate_value = 0
     for ex in active_executors:
         try:
-            aggregate_value += run_executor_strategy(ex, data_provider, btc_trend, reset_to_usdc)
+            aggregate_value += run_executor_strategy(ex, data_provider, market_regime, reset_to_usdc)
         except Exception as e:
             logging.error(f"Strategy failed for {ex.__class__.__name__}: {e}")
 
@@ -755,7 +994,10 @@ def _run_bot(reset_to_usdc=False):
     increment_run_count()
     log_performance_summary()
     logging.info(f"=== Run Summary ===")
-    logging.info(f"Market Regime ({TREND_ASSET}): {btc_trend}")
+    if ENABLE_DUAL_REGIME:
+        logging.info(f"Market Regime: {full_regime}")
+    else:
+        logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
     logging.info(f"Portfolio Value: ${aggregate_value:,.2f}")
     logging.info(f"Risk Params: max_pos=${MAX_POSITION_USD:,.0f} | max_dd={MAX_DRAWDOWN_PCT}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")

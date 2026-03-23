@@ -71,6 +71,7 @@ def mock_executor():
     executor = MagicMock()
     executor.__class__.__name__ = "TestExecutor"
     executor.get_balances.return_value = {"cash": {"USDC": 10000.0}, "crypto": {}}
+    executor.get_supported_assets.return_value = ["BTC"]  # Mock with single asset for simplicity
     executor.place_limit_order.return_value = {"success": True}
     executor.place_market_order.return_value = {"success": True}
     # Remove 'account' attribute so ex_id stays simple

@@ -87,8 +87,12 @@ def generate_report(signals):
         with open(LOG_FILE, "r") as f:
             lines_log = f.readlines()
             for line in reversed(lines_log[-100:]):
-                if ("Market Regime:" in line or "Market:" in line) and "Portfolio" not in line:
-                    status = line.split(":")[-1].strip()
+                # Look for "Market Regime:" in log - supports both dual-signal and single-asset formats
+                # Dual-signal: "Market Regime: STRONG_BULL (BTC: BULL | Rotation: ETH_LEADING)"
+                # Single-asset: "Market Regime (BTC): BULL"
+                if "Market Regime:" in line and "Portfolio" not in line and "===" not in line:
+                    # Extract everything after "Market Regime:"
+                    status = line.split("Market Regime:", 1)[1].strip()
                     break
     report.append(f"Market Status: {status}\n")
     
