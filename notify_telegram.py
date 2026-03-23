@@ -81,26 +81,33 @@ def main():
     # Load and possibly update market state
     state = load_market_state()
     current_status = extract_market_status(report_content)
+    
+    # Only proceed if status changed
     if state["last_status"] != current_status:
-        # Status changed
-        if current_status.lower() == "bullish":
-            state["bullish_changes"] += 1
-        elif current_status.lower() == "bearish":
+        # Status changed - determine direction
+        change_type = ""
+        if state["last_status"].lower() == "bullish" and current_status.lower() == "bearish":
+            change_type = "BULL → BEAR"
             state["bearish_changes"] += 1
-        # Record the change event with the new emoji
+        elif state["last_status"].lower() == "bearish" and current_status.lower() == "bullish":
+            change_type = "BEAR → BULL"
+            state["bullish_changes"] += 1
+        else:
+            change_type = f"{state['last_status']} → {current_status}"
+            if current_status.lower() == "bullish":
+                state["bullish_changes"] += 1
+            elif current_status.lower() == "bearish":
+                state["bearish_changes"] += 1
+        
+        # Record the change event
         state["transactions"].append({
             "time": datetime.now().isoformat(),
-            "detail": f"{REGIME_CHANGE_EMOJI} Regime change: {state['last_status']} → {current_status}"
+            "detail": f"{REGIME_CHANGE_EMOJI} Regime change: {change_type}"
         })
         state["last_status"] = current_status
         save_market_state(state)
 
-    # Determine whether to send a notification
-    is_heartbeat = datetime.now().hour == 8 and datetime.now().minute < 10
-    has_signals = "No new trading signals" not in report_content
-
-    if has_signals or is_heartbeat:
-        # Build enriched message
+        # Send notification ONLY on regime change
         extra = (
             f"\nBullish regime changes: {state['bullish_changes']}"\
             f"\nBearish regime changes: {state['bearish_changes']}"
@@ -112,10 +119,10 @@ def main():
                 f"\n- {tx['time']}: {tx['detail']}" for tx in recent_tx
             ])
         full_message = f"<pre>{report_content}{extra}</pre>"
-        print("Sending notification...")
+        print("Regime change detected. Sending notification...")
         send_telegram_message(full_message)
     else:
-        print("No new signals and not heartbeat time. Skipping notification.")
+        print("No regime change. Skipping notification.")
 
 if __name__ == "__main__":
     main()

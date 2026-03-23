@@ -77,6 +77,11 @@ RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "70"))
 ROUND_TRIP_FEE_PCT = float(os.environ.get("ROUND_TRIP_FEE_PCT", "0.006"))
 
 # Take-Profit Levels
+# Trend Detection Switch: "BTC" or "ETH" (default: BTC)
+TREND_ASSET = os.environ.get("TREND_ASSET", "BTC").upper()
+if TREND_ASSET not in ["BTC", "ETH"]:
+    TREND_ASSET = "BTC"  # fallback to BTC if invalid
+logging.info(f"Using {TREND_ASSET} for market regime detection")
 TAKE_PROFIT_1_PCT = float(os.environ.get("TAKE_PROFIT_1_PCT", "0.10"))
 TAKE_PROFIT_1_SELL_RATIO = float(os.environ.get("TAKE_PROFIT_1_SELL_RATIO", "0.33"))
 TAKE_PROFIT_2_PCT = float(os.environ.get("TAKE_PROFIT_2_PCT", "0.20"))
@@ -731,10 +736,11 @@ def _run_bot(reset_to_usdc=False):
     data_provider = cb_executor
 
     # Global Trend
-    btc_df = data_provider.get_market_data(get_data_product_id("BTC"), LONG_WINDOW)
-    btc_s, btc_l = analyze_trend(btc_df)
-    btc_trend = "BEAR" if btc_s and btc_l and btc_s < btc_l else "BULL"
-    logging.info(f"Market Regime: {btc_trend}")
+    trend_product = get_data_product_id(TREND_ASSET)
+    trend_df = data_provider.get_market_data(trend_product, LONG_WINDOW)
+    trend_s, trend_l = analyze_trend(trend_df)
+    btc_trend = "BEAR" if trend_s and trend_l and trend_s < trend_l else "BULL"
+    logging.info(f"Market Regime ({TREND_ASSET}): {btc_trend}")
 
     aggregate_value = 0
     for ex in active_executors:
@@ -749,7 +755,7 @@ def _run_bot(reset_to_usdc=False):
     increment_run_count()
     log_performance_summary()
     logging.info(f"=== Run Summary ===")
-    logging.info(f"Market Regime: {btc_trend}")
+    logging.info(f"Market Regime ({TREND_ASSET}): {btc_trend}")
     logging.info(f"Portfolio Value: ${aggregate_value:,.2f}")
     logging.info(f"Risk Params: max_pos=${MAX_POSITION_USD:,.0f} | max_dd={MAX_DRAWDOWN_PCT}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
