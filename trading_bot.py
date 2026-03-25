@@ -66,6 +66,11 @@ logging.info(f"Dual-signal regime detection: {'ENABLED' if config.enable_dual_re
 logging.info(f"Bitcoin dominance tracking: {'ENABLED' if config.enable_btc_dominance else 'DISABLED'}")
 logging.info(f"Trading mode: {exec_config.trading_mode}")
 
+# Import strategy system
+from strategies import create_strategy
+strategy = create_strategy(config.strategy, technical_analysis, config)
+logging.info(f"Strategy: {strategy.name}")
+
 # Import specialized executors (after config loaded)
 from executors import CoinbaseExecutor, EthereumExecutor, validate_executor
 
@@ -255,7 +260,11 @@ def get_momentum_ranking(df):
     """Wrapper for backward compatibility"""
     return technical_analysis.get_momentum_ranking(df, MOMENTUM_WINDOW_HOURS)
 
-def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=False):
+def is_crossover_confirmed(df, direction="bull"):
+    """Wrapper for backward compatibility"""
+    return technical_analysis.is_crossover_confirmed(df, direction)
+
+def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False):
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
@@ -298,6 +307,10 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
             clear_entry_price(ex_id, get_data_product_id(asset))
         return ex_value
 
+    # Skip new entries if strategy says so for this regime
+    if strategy.should_skip_regime(market_regime, full_regime):
+        logging.info(f"[{ex_id}] {full_regime} regime — {strategy.name} skipping new entries")
+
     # Scan for buys
     trade_limit = ex_value * PORTFOLIO_RISK_PERCENTAGE
     short_limit = ex_value * SHORT_RISK_PERCENTAGE
@@ -309,54 +322,27 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
         product_id = get_data_product_id(asset)
         try:
             df = data_provider.get_market_data(product_id, LONG_WINDOW)
-            ma_s, ma_l = analyze_trend(df)
-            # BTC exemption: allow BTC buys in BEAR if ALLOW_BTC_IN_BEAR is enabled (hedging strategy)
-            allow_buy = market_regime == "BULL" or (ALLOW_BTC_IN_BEAR and asset == "BTC")
-            if ma_s and ma_l and ma_s > ma_l * 1.002 and allow_buy:
-                # Log when BTC bear-market exemption is triggered
-                if market_regime == "BEAR" and asset == "BTC" and ALLOW_BTC_IN_BEAR:
-                    logging.info(f"[{ex_id}] BTC bear-market exemption triggered (hedging strategy)")
-                # Volume filter: check 24h USD volume
-                if df is not None and len(df) >= 24:
-                    volume_24h = df['volume'].iloc[-24:].sum()
-                    close_price = df['close'].iloc[-1]
-                    usd_volume_24h = volume_24h * close_price
-                    if usd_volume_24h < MIN_24H_VOLUME_USD:
-                        logging.info(f"[{ex_id}] Skipping {asset}: 24h USD volume ${usd_volume_24h:,.0f} below minimum ${MIN_24H_VOLUME_USD:,.0f}")
-                        continue
-                # RSI filter: skip overbought assets
-                rsi = calculate_rsi(df)
-                if rsi is not None:
-                    logging.info(f"[{ex_id}] {asset} RSI: {rsi:.1f}")
-                    if rsi > RSI_OVERBOUGHT:
-                        logging.info(f"[{ex_id}] Skipping {asset}: RSI {rsi:.1f} > {RSI_OVERBOUGHT} (overbought)")
-                        continue
-                asset_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
+            candidate = strategy.scan_entry(asset, product_id, df, market_regime, full_regime)
+            if candidate is not None:
+                asset_candidates.append(candidate)
         except Exception as e: logging.error(f"[{ex_id}] Error analyzing {asset}: {e}")
 
-    # Short candidates in BEAR market (momentum is inverted for shorts)
+    # Short candidates in BEAR market
     short_candidates = []
-    if market_regime == "BEAR":
+    if strategy.enables_short and market_regime == "BEAR":
         for asset in supported_assets:
             if is_asset_blacklisted(asset): continue
             product_id = get_data_product_id(asset)
             try:
                 df = data_provider.get_market_data(product_id, LONG_WINDOW)
-                ma_s, ma_l = analyze_trend(df)
-                if ma_s and ma_l and ma_s < ma_l * 0.998:  # Downtrend
-                    # Volume filter
-                    if df is not None and len(df) >= 24:
-                        volume_24h = df['volume'].iloc[-24:].sum()
-                        close_price = df['close'].iloc[-1]
-                        usd_volume_24h = volume_24h * close_price
-                        if usd_volume_24h < MIN_24H_VOLUME_USD:
-                            continue
-                    short_candidates.append({"asset": asset, "product_id": product_id, "momentum": get_momentum_ranking(df)})
+                candidate = strategy.scan_short_entry(asset, product_id, df, market_regime, full_regime)
+                if candidate is not None:
+                    short_candidates.append(candidate)
             except Exception as e: logging.error(f"[{ex_id}] Error analyzing short {asset}: {e}")
 
-        short_candidates.sort(key=lambda x: x["momentum"])  # Most negative momentum first
+        short_candidates = strategy.rank_short_candidates(short_candidates)
 
-    asset_candidates.sort(key=lambda x: x["momentum"], reverse=True)
+    asset_candidates = strategy.rank_candidates(asset_candidates)
 
     available_usdc = cash
     available_short_usdc = cash  # Separate pool for short positions
@@ -413,7 +399,7 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
     # Short selling in BEAR market (5% of portfolio limit)
-    if ENABLE_SHORT:
+    if strategy.enables_short:
         for candidate in short_candidates[:TOP_MOMENTUM_COUNT]:
             asset, product_id = candidate["asset"], candidate["product_id"]
             try:
@@ -434,7 +420,7 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
             except Exception as e:
                 logging.error(f"[{ex_id}] Error evaluating short {asset}: {e}")
     else:
-        logging.info(f"[{ex_id}] Short selling disabled via ENABLE_SHORT=False")
+        logging.info(f"[{ex_id}] Short selling disabled (strategy={strategy.name})")
 
     # Manage Sells
     for asset, amt in held.items():
@@ -465,64 +451,14 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
             # --- Get take-profit flags ---
             tp_flags = state.get("take_profit_flags", {}).get(entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False})
 
-            sell_trigger = False
-            sell_ratio = 1.0
-            reason = ""
+            sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
+                asset, product_id, df, price, entry, hwm, tp_flags, state, entry_key
+            )
 
-            # Priority 1: Take-Profit Level 2 (higher gain threshold)
-            if not tp_flags.get("tp2_hit", False) and price >= entry * (1 + TAKE_PROFIT_2_PCT):
-                sell_trigger = True
-                sell_ratio = TAKE_PROFIT_2_SELL_RATIO
-                reason = f"Take-profit level 2 triggered for {asset} (price ${price:,.2f} >= ${entry * (1 + TAKE_PROFIT_2_PCT):,.2f}, selling {TAKE_PROFIT_2_SELL_RATIO*100:.0f}%)"
-                tp_flags["tp2_hit"] = True
-                # Also mark TP1 as hit since we passed it
-                tp_flags["tp1_hit"] = True
+            # Persist updated tp_flags if they changed
+            if sell_trigger:
                 state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
                 save_state(state)
-
-            # Priority 2: Take-Profit Level 1 (lower gain threshold)
-            elif not tp_flags.get("tp1_hit", False) and price >= entry * (1 + TAKE_PROFIT_1_PCT):
-                sell_trigger = True
-                sell_ratio = TAKE_PROFIT_1_SELL_RATIO
-                reason = f"Take-profit level 1 triggered for {asset} (price ${price:,.2f} >= ${entry * (1 + TAKE_PROFIT_1_PCT):,.2f}, selling {TAKE_PROFIT_1_SELL_RATIO*100:.0f}%)"
-                tp_flags["tp1_hit"] = True
-                state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
-                save_state(state)
-
-            # Priority 3: Trailing Stop-Loss (ATR-based dynamic stop)
-            #
-            # Instead of a fixed % stop, we use ATR to adapt to volatility:
-            #   atr_stop = 2 * ATR / price
-            # This gives the stop as a fraction of current price. Multiplying ATR
-            # by 2 means we tolerate ~2 average bars of adverse movement before
-            # triggering. The result is clamped to [2%, 15%] to avoid extremes.
-            #
-            # The stop trails the High Water Mark (HWM), not the entry price.
-            # As price rises, HWM rises with it, ratcheting the stop upward.
-            # Sell triggers when: price < HWM * (1 - atr_stop)
-            elif True:
-                atr = calculate_atr(df)
-                if atr is not None and price > 0:
-                    atr_stop = 2 * atr / price
-                    atr_stop = max(0.02, min(0.15, atr_stop))
-                    effective_trailing_stop = atr_stop
-                else:
-                    effective_trailing_stop = TRAILING_STOP_PCT
-                if price < hwm * (1 - effective_trailing_stop):
-                    sell_trigger = True
-                    sell_ratio = 1.0
-                    reason = f"Trailing stop-loss triggered for {asset} (price ${price:,.2f} < high water mark ${hwm:,.2f} * {1 - effective_trailing_stop:.2f}, stop={effective_trailing_stop*100:.1f}%)"
-
-            # Priority 4: Trend-exit (MA cross) — fallback (only fires once per entry)
-            if not sell_trigger and not tp_flags.get("trend_exit_hit", False):
-                ma_s, ma_l = analyze_trend(df)
-                if ma_s and ma_l and ma_s < ma_l * 0.998:
-                    sell_trigger = True
-                    sell_ratio = 0.5
-                    reason = f"Trend-exit (50%) triggered for {asset}"
-                    tp_flags["trend_exit_hit"] = True
-                    state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
-                    save_state(state)
 
             if sell_trigger:
                 logging.info(f"[{ex_id}] 🚨 {reason}")
@@ -567,7 +503,7 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
 
     # Manage Short Position Closes (buy-back when trend reverses or stop hit)
-    if ENABLE_SHORT:
+    if strategy.enables_short:
         short_entries = {k: v for k, v in state.get("entry_prices", {}).items()
                         if k.startswith(f"{ex_id}:") and k.endswith(":SHORT")}
         for short_key, short_entry in short_entries.items():
@@ -605,26 +541,78 @@ def run_executor_strategy(executor, data_provider, market_regime, reset_to_usdc=
 
                 if close_short:
                     logging.info(f"[{ex_id}] 🚨 {reason}")
-                    # Buy back to close the short — use the original short size
-                    # We don't track short quantity separately, so we close the full position
-                    short_value = short_entry  # approximate — this is USD-denominated entry
+                    short_value = short_entry
+
+                    # Try limit order first
                     result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=short_value)
-                    if result:
-                        if isinstance(result, dict) and result.get("success") is False:
-                            logging.warning(f"[{ex_id}] Short close for {asset} failed: {result.get('error')}")
+
+                    # Detect failure: None = API exception, or Coinbase rejection
+                    order_failed = (
+                        result is None
+                        or (isinstance(result, dict) and result.get("success") is False)
+                        or (isinstance(result, dict) and "error_response" in result)
+                    )
+
+                    if order_failed:
+                        fail_count = state.get("short_close_failures", {}).get(short_key, 0) + 1
+                        state.setdefault("short_close_failures", {})[short_key] = fail_count
+
+                        # Extract actual error from Coinbase response
+                        if result is None:
+                            error_detail = "API request returned None"
+                        elif isinstance(result, dict):
+                            error_detail = (
+                                result.get("failure_reason")
+                                or result.get("error_response", {}).get("message")
+                                or result.get("error")
+                                or str(result)
+                            )
                         else:
-                            # Short PnL is inverted: profit when price drops.
-                            # qty = short_value / short_entry (how many units we shorted)
-                            # PnL = (entry - exit) * qty - fees
-                            # Positive when exit < entry (price dropped as expected).
-                            pnl = (short_entry - price) * (short_value / short_entry) - short_entry * (short_value / short_entry) * ROUND_TRIP_FEE_PCT
-                            is_win = pnl > 0
-                            record_trade(is_win, pnl)
-                            logging.info(f"[{ex_id}] 📊 Short PnL: ${pnl:+.2f} (entry=${short_entry:,.2f} -> exit=${price:,.2f})")
-                            # Clear the short entry
-                            if short_key in state.get("entry_prices", {}):
-                                del state["entry_prices"][short_key]
-                                save_state(state)
+                            error_detail = str(result)
+
+                        logging.warning(
+                            f"[{ex_id}] Short close limit order for {asset} failed "
+                            f"(attempt {fail_count}): {error_detail}. "
+                            f"Falling back to market order."
+                        )
+
+                        # Fallback: IOC market order for emergency exit
+                        result = executor.place_market_order(
+                            product_id, 'BUY',
+                            amount_quote_currency=short_value
+                        )
+
+                        if result is None or (isinstance(result, dict) and result.get("success") is False):
+                            market_error = str(result) if result else "API request returned None"
+                            if fail_count >= 3:
+                                logging.critical(
+                                    f"[{ex_id}] CRITICAL: Cannot close short for {asset} "
+                                    f"after {fail_count} attempts. Market order also failed: "
+                                    f"{market_error}. Position is TRAPPED."
+                                )
+                            else:
+                                logging.error(
+                                    f"[{ex_id}] Market order fallback for {asset} also failed: "
+                                    f"{market_error}. Will retry next cycle."
+                                )
+                            save_state(state)
+                            continue
+
+                        logging.info(f"[{ex_id}] Market order fallback succeeded for {asset}")
+                        order_failed = False
+
+                    if not order_failed:
+                        # Clear failure counter
+                        if "short_close_failures" in state and short_key in state.get("short_close_failures", {}):
+                            del state["short_close_failures"][short_key]
+
+                        pnl = (short_entry - price) * (short_value / short_entry) - short_entry * (short_value / short_entry) * ROUND_TRIP_FEE_PCT
+                        is_win = pnl > 0
+                        record_trade(is_win, pnl)
+                        logging.info(f"[{ex_id}] 📊 Short PnL: ${pnl:+.2f} (entry=${short_entry:,.2f} -> exit=${price:,.2f})")
+                        if short_key in state.get("entry_prices", {}):
+                            del state["entry_prices"][short_key]
+                            save_state(state)
             except Exception as e:
                 logging.error(f"[{ex_id}] Error managing short close for {asset}: {e}")
 
@@ -748,7 +736,7 @@ def _run_bot(reset_to_usdc=False):
     aggregate_value = 0
     for ex in active_executors:
         try:
-            aggregate_value += run_executor_strategy(ex, data_provider, market_regime, reset_to_usdc)
+            aggregate_value += run_executor_strategy(ex, data_provider, market_regime, full_regime, reset_to_usdc)
         except Exception as e:
             logging.error(f"Strategy failed for {ex.__class__.__name__}: {e}")
 
