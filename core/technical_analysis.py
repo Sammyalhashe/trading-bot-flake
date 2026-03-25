@@ -36,9 +36,36 @@ class TechnicalAnalysis:
         """
         if df is None or len(df) < self.ma_long_window:
             return None, None
-        s_ma = df['close'].rolling(window=self.ma_short_window).mean().iloc[-1]
-        l_ma = df['close'].rolling(window=self.ma_long_window).mean().iloc[-1]
+        s_ma = df['close'].ewm(span=self.ma_short_window, adjust=False).mean().iloc[-1]
+        l_ma = df['close'].ewm(span=self.ma_long_window, adjust=False).mean().iloc[-1]
         return s_ma, l_ma
+
+    def is_crossover_confirmed(self, df: pd.DataFrame, direction: str = "bull", buffer: float = 1.002) -> bool:
+        """Check if MA crossover held for both current and previous bar.
+
+        Reduces false signals by requiring the crossover to persist for two
+        consecutive bars before generating an entry signal.
+
+        Args:
+            df: DataFrame with 'close' column
+            direction: "bull" (short > long) or "bear" (short < long)
+            buffer: Multiplier buffer (default 0.2% = 1.002)
+
+        Returns:
+            bool: True if crossover confirmed on both bars
+        """
+        if df is None or len(df) < self.ma_long_window + 1:
+            return False
+        s_ema = df['close'].ewm(span=self.ma_short_window, adjust=False).mean()
+        l_ema = df['close'].ewm(span=self.ma_long_window, adjust=False).mean()
+        if direction == "bull":
+            current = s_ema.iloc[-1] > l_ema.iloc[-1] * buffer
+            previous = s_ema.iloc[-2] > l_ema.iloc[-2] * buffer
+        else:
+            inv_buffer = 2 - buffer  # 1.002 -> 0.998
+            current = s_ema.iloc[-1] < l_ema.iloc[-1] * inv_buffer
+            previous = s_ema.iloc[-2] < l_ema.iloc[-2] * inv_buffer
+        return current and previous
 
     def calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> float | None:
         """Calculate RSI (Relative Strength Index) from candle close prices.
@@ -121,3 +148,44 @@ class TechnicalAnalysis:
         curr = df['close'].iloc[-1]
         hist = df['close'].iloc[-(window_hours + 1)]
         return ((curr - hist) / hist) * 100 if hist != 0 else 0.0
+
+    def calculate_bollinger_bands(self, df: pd.DataFrame, period: int = 20, num_std: float = 2.0) -> tuple[float, float, float] | None:
+        """Calculate Bollinger Bands (middle, upper, lower).
+
+        Bollinger Bands measure volatility around a moving average:
+          - Middle = SMA(period)
+          - Upper  = Middle + num_std * std(period)
+          - Lower  = Middle - num_std * std(period)
+
+        Price below the lower band suggests oversold conditions.
+
+        Args:
+            df: DataFrame with 'close' column
+            period: SMA period (default: 20)
+            num_std: Number of standard deviations (default: 2.0)
+
+        Returns:
+            tuple: (middle, upper, lower) or None if insufficient data
+        """
+        if df is None or len(df) < period:
+            return None
+        close = df['close'].iloc[-period:]
+        middle = close.mean()
+        std = close.std()
+        upper = middle + num_std * std
+        lower = middle - num_std * std
+        return middle, upper, lower
+
+    def calculate_sma(self, df: pd.DataFrame, period: int = 20) -> float | None:
+        """Calculate Simple Moving Average.
+
+        Args:
+            df: DataFrame with 'close' column
+            period: SMA period (default: 20)
+
+        Returns:
+            float: SMA value, or None if insufficient data
+        """
+        if df is None or len(df) < period:
+            return None
+        return df['close'].iloc[-period:].mean()

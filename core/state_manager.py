@@ -2,6 +2,7 @@
 import json
 import fcntl
 import os
+import time
 import datetime
 from pathlib import Path
 from decimal import Decimal
@@ -37,7 +38,9 @@ class StateManager:
         default_state = {
             "entry_prices": {},
             "high_water_marks": {},
-            "take_profit_flags": {}
+            "take_profit_flags": {},
+            "short_close_failures": {},
+            "entry_timestamps": {}
         }
         lock_fd = self._acquire_lock()
         try:
@@ -48,6 +51,8 @@ class StateManager:
                     state.setdefault("entry_prices", {})
                     state.setdefault("high_water_marks", {})
                     state.setdefault("take_profit_flags", {})
+                    state.setdefault("short_close_failures", {})
+                    state.setdefault("entry_timestamps", {})
                     return state
                 except Exception as e:
                     logger.error(f"Failed to load state: {e}")
@@ -82,6 +87,8 @@ class StateManager:
             "tp2_hit": False,
             "trend_exit_hit": False
         }
+        # Store entry timestamp for time-based exits
+        state.setdefault("entry_timestamps", {})[key] = time.time()
         self.save_state(state)
 
     def clear_entry_price(self, executor_id: str, product_id: str) -> None:
@@ -96,6 +103,9 @@ class StateManager:
         # Also clear take-profit flags
         if key in state.get("take_profit_flags", {}):
             del state["take_profit_flags"][key]
+        # Also clear entry timestamp
+        if key in state.get("entry_timestamps", {}):
+            del state["entry_timestamps"][key]
         self.save_state(state)
 
     def load_peak_value(self, executor_id: str = "default") -> float:

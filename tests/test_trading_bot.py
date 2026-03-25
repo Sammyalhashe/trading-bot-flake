@@ -265,7 +265,8 @@ class TestTrendExitFlag:
         trading_bot.update_entry_price("TestExecutor", "BTC-USDC", current_price)
 
         # Disable short selling for this test
-        with patch.object(trading_bot, 'ENABLE_SHORT', False):
+        trading_bot.strategy.enables_short = False
+        try:
             # First run: trend exit should trigger
             trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
             first_sell_calls = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
@@ -281,6 +282,8 @@ class TestTrendExitFlag:
             # Second run: trend exit should NOT trigger again (flag set)
             trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
             second_sell_calls = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
+        finally:
+            trading_bot.strategy.enables_short = trading_bot.config.enable_short
 
             assert len(first_sell_calls) > 0, "Trend exit should trigger on first run"
             assert len(second_sell_calls) == 0, "Trend exit should NOT trigger on second run"

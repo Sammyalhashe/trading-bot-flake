@@ -48,6 +48,16 @@ class TradingConfig:
     momentum_window_hours: int
     top_momentum_count: int
 
+    # Strategy Selection
+    strategy: str
+
+    # Mean-Reversion Parameters
+    mr_rsi_oversold: Decimal
+    mr_bollinger_period: int
+    mr_bollinger_std: float
+    mr_trailing_stop_pct: Decimal
+    mr_time_exit_candles: int
+
     # Asset Mapping (for rebranded/bridged tokens)
     asset_mapping: dict[str, str]
 
@@ -95,6 +105,16 @@ class TradingConfig:
             # Strategy Flags
             enable_short=os.getenv("ENABLE_SHORT", "true").lower() == "true",
 
+            # Strategy Selection
+            strategy=os.getenv("STRATEGY", "trend_following"),
+
+            # Mean-Reversion Parameters
+            mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "30")),
+            mr_bollinger_period=int(os.getenv("MR_BOLLINGER_PERIOD", "20")),
+            mr_bollinger_std=float(os.getenv("MR_BOLLINGER_STD", "2.0")),
+            mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.05")),
+            mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "24")),
+
             # Asset Configuration
             asset_blacklist=["DOGE", "SHLD", "SHIB"],
             momentum_window_hours=24,
@@ -111,6 +131,11 @@ class TradingConfig:
     def validate(self) -> None:
         """Validate configuration constraints"""
         errors = []
+
+        # Strategy validation
+        valid_strategies = ["trend_following", "mean_reversion"]
+        if self.strategy not in valid_strategies:
+            errors.append(f"Invalid strategy '{self.strategy}', must be one of {valid_strategies}")
 
         # Moving Average validation
         if self.ma_short_window >= self.ma_long_window:
