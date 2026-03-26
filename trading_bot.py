@@ -278,7 +278,10 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     ex_value = cash
     for asset, amt in held.items():
         details = data_provider.get_product_details(get_data_product_id(asset))
-        if details: ex_value += amt * float(details['price'])
+        if details:
+            ex_value += amt * float(details['price'])
+        else:
+            logging.warning(f"[{ex_id}] Could not price {asset} (product_id={get_data_product_id(asset)}), excluding from portfolio value")
 
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash:,.2f}")
 
@@ -435,6 +438,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             entry = state.get("entry_prices", {}).get(entry_key)
 
             if not entry:
+                logging.warning(f"[{ex_id}] Holding {asset} ({amt:.6f}) has no entry price in state — position is unmanaged. Add entry manually or sell.")
                 continue
 
             # --- Fetch candle data once for trailing stop ATR and trend exit ---

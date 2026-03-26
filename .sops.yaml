@@ -1,0 +1,29 @@
+keys:
+  - &admin "age128ysu8edumjg8vy569437gcpaktvrjn6w7nm3edxrvv8fyja9s3snletxt"
+  # homebase ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINStROzIuV602aUEv76dLfGxghpxehBZtkA4m0Cft9nS
+  - &homebase "age1n5ae2d56qh8kns4t3z8dzgvf0wgkgu6q8hynzpshp9jwde37lpyqm35rqp"
+  - &starshipwsl "age16h85hqjxeuykd8gwt536vegax0734wux6gqtwywhmeglwvxw533qg458pl"
+  - &starship "age1yzlxa6stqedvgpa0sxq4gxq9gdu25ymhaw9aq4qh5grtu5rrw4nsphakej"
+  - &starship_user "age1a8hfmtkgfp2s4zz05uxg3pqrsjw83ntfjuzp07u8ygs4j97excksx5y0r7"
+  - &filestore "age1hr79rk7vhmk3ns4cccx5eucktukdywrc59sk3kqxdl4tz8v88q6qxhdc83"
+  - &filestore_user "age15vs4n27r2qedg2dngad7z39yz2xk6cl7254n7mt8ypqeku46veusyuw46l"
+  - &mothership "age14w8agagd42tvgfk3l9qc9rg0ht2nfhjzvqjmyx4wp4ap8nm0csjq5ralr4"
+  - &mothership_user "age1mypdj8sj85nfz4kgncqmrnc6aceacf0tugm87tean67jddqx6qhqksxp0d"
+  - &oldboy "age123sd3m8zy4yp0sak5tcq3nzd3afw6xh7pvvnrn9dvwudryhx3g9qdzkcv5"
+  - &homebasewsl "age136sr38ddk6ngzdekvrcjwsfz5n2dkax35u578ze0krgjw5h6us7s5vacnd"
+
+creation_rules:
+  - path_regex: secrets.yaml
+    key_groups:
+      - age:
+          - *admin
+          - *homebase
+          - *starshipwsl
+          - *starship
+          - *starship_user
+          - *filestore
+          - *filestore_user
+          - *mothership
+          - *mothership_user
+          - *oldboy
+          - *homebasewsl
