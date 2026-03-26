@@ -18,6 +18,7 @@ class TradingConfig:
     risk_per_trade_pct: Decimal
     max_position_usd: Decimal
     max_drawdown_pct: Decimal
+    drawdown_cooldown_hours: int
     min_order_usd: Decimal
 
     # Regime Detection
@@ -80,6 +81,7 @@ class TradingConfig:
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.95")),
             max_position_usd=Decimal(os.getenv("MAX_POSITION_USD", "5000")),
             max_drawdown_pct=Decimal(os.getenv("MAX_DRAWDOWN_PCT", "10")),
+            drawdown_cooldown_hours=int(os.getenv("DRAWDOWN_COOLDOWN_HOURS", "24")),
             min_order_usd=Decimal(os.getenv("MIN_ORDER_USD", "10")),
 
             # Regime Detection
