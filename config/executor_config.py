@@ -30,7 +30,10 @@ class ExecutorConfig:
         return cls(
             trading_mode=os.getenv("TRADING_MODE", "paper").lower(),
             api_json_file=Path(os.getenv("COINBASE_API_JSON", os.path.join(home, "cdb_api_key.json"))),
-            state_file=Path(os.getenv("TRADING_STATE_FILE", os.path.join(home, "trading-bot-flake", "trading_state.json"))),
+            state_file=Path(os.getenv("TRADING_STATE_FILE", os.path.join(
+                os.getenv("XDG_STATE_HOME", os.path.join(home, ".local", "state")),
+                "trading-bot", "trading_state.json"
+            ))),
             log_file=Path(os.getenv("TRADING_LOG_FILE", os.path.join(home, ".openclaw", "workspace", "trading-bot", "trading.log"))),
             coinbase_enabled=True,  # Always enabled by default
             ethereum_enabled=os.getenv("ENABLE_ETHEREUM", "false").lower() == "true",

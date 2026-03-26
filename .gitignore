@@ -1,2 +1,9 @@
 __pycache__/
 .aider*
+
+# Runtime state — managed by the bot, not by git
+trading_state.json
+trading_state.json.lock
+trading_state.json.tmp
+trading_state.runlock
+market_state.json
