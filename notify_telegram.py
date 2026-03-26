@@ -11,7 +11,10 @@ REPORT_FILE = os.environ.get("TRADING_REPORT_FILE", os.path.join(_HOME, ".opencl
 TELEGRAM_TOKEN_FILE = "/run/secrets/telegram_bot_token"
 CHAT_ID = "8555669756"
 # File to persist market regime change counters and recent transactions
-MARKET_STATE_FILE = os.environ.get("MARKET_STATE_FILE", os.path.join(_HOME, "trading-bot-flake", "market_state.json"))
+MARKET_STATE_FILE = os.environ.get("MARKET_STATE_FILE", os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.join(_HOME, ".local", "state")),
+    "trading-bot", "market_state.json"
+))
 
 # Emoji definitions
 REGIME_CHANGE_EMOJI = "🔄"  # blue arrow cycle for market flips
