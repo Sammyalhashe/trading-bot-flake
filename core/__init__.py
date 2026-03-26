@@ -2,5 +2,6 @@
 from .state_manager import StateManager
 from .technical_analysis import TechnicalAnalysis
 from .regime_detection import RegimeDetector
+from .ws_client import CoinbaseWSClient
 
-__all__ = ['StateManager', 'TechnicalAnalysis', 'RegimeDetector']
+__all__ = ['StateManager', 'TechnicalAnalysis', 'RegimeDetector', 'CoinbaseWSClient']

@@ -12,7 +12,7 @@
         pkgs = import nixpkgs { inherit system; };
 
         pythonDependencies = ps: with ps;
-          [ requests pandas pyjwt cryptography pytest web3 ];
+          [ requests pandas pyjwt cryptography pytest web3 websockets ];
 
         pythonEnv = pkgs.python3.withPackages pythonDependencies;
 
