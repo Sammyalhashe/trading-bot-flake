@@ -1016,6 +1016,9 @@ class EthereumExecutor:
             return {"success": True}
 
 
+    def cancel_open_orders(self, product_id=None):
+        pass  # On-chain swaps are atomic; no open orders to cancel
+
     def place_limit_order(self, product_id, side, price, amount_quote_currency=None, amount_base_currency=None):
         return self.place_market_order(product_id, side, amount_quote_currency, amount_base_currency)
 
