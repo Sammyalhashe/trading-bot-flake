@@ -4,9 +4,13 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, sops-nix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -87,7 +91,42 @@
           buildInputs = [
             pythonEnv
             pkgs.python3Packages.pip
+            pkgs.sops
+            pkgs.age
+            (pkgs.writeShellScriptBin "load-trading-secrets" ''
+              set -e
+              SECRETS_FILE="secrets.yaml"
+              if [[ ! -f "''${SECRETS_FILE}" ]]; then
+                echo "ERROR: ''${SECRETS_FILE} not found in current directory" >&2
+                exit 1
+              fi
+              # Output export statements for environment variables
+              echo "export ETH_RPC_URL=''$(sops -d --extract '["eth_rpc_url"]' "''${SECRETS_FILE}" 2>/dev/null || echo \"\")"
+              echo "export ETH_PRIVATE_KEY=''$(sops -d --extract '["eth_private_key"]' "''${SECRETS_FILE}" 2>/dev/null || echo \"\")"
+              echo "export TELEGRAM_BOT_TOKEN=''$(sops -d --extract '["telegram_bot_token"]' "''${SECRETS_FILE}" 2>/dev/null || echo \"\")"
+              # Generate coinbase API JSON file and output export
+              COINBASE_ID=''$(sops -d --extract '["coinbase_api_id_clawdbot"]' "''${SECRETS_FILE}" 2>/dev/null || echo "")
+              COINBASE_SECRET=''$(sops -d --extract '["coinbase_api_secret_clawdbot"]' "''${SECRETS_FILE}" 2>/dev/null || echo "")
+              if [[ -n "''${COINBASE_ID}" && -n "''${COINBASE_SECRET}" ]]; then
+                COINBASE_JSON_DIR="''${XDG_DATA_HOME:-''${HOME}/.local/share}/trading-bot"
+                mkdir -p "''${COINBASE_JSON_DIR}"
+                COINBASE_JSON_PATH="''${COINBASE_JSON_DIR}/cdb_api_key.json"
+                cat > "''${COINBASE_JSON_PATH}" <<EOF
+{
+   "name": "''${COINBASE_ID}",
+   "privateKey": "''${COINBASE_SECRET}"
+}
+EOF
+                echo "export COINBASE_API_JSON=''${COINBASE_JSON_PATH}"
+                echo "Coinbase API JSON written to ''${COINBASE_JSON_PATH}" >&2
+              fi
+            '')
+            (pkgs.writeShellScriptBin "edit-trading-secrets" ''
+              sops secrets.yaml
+            '')
           ];
         };
-      });
+      }) // {
+        nixosModules.default = import ./modules/sops.nix;
+      };
 }
