@@ -26,33 +26,41 @@
 
           installPhase = ''
             mkdir -p $out/bin
-            
-            # Copy all python files to bin (they will be in the same dir)
+
+            # Copy all python files and packages to bin
             cp $src/*.py $out/bin/
+            cp -r $src/config $out/bin/config
+            cp -r $src/core $out/bin/core
+            cp -r $src/strategies $out/bin/strategies
+            cp -r $src/executors $out/bin/executors
 
             # Rename main entry point
             mv $out/bin/trading_bot.py $out/bin/trading-bot
             chmod +x $out/bin/trading-bot
             wrapProgram $out/bin/trading-bot \
-              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
 
             # Rename report bot
             mv $out/bin/report_bot.py $out/bin/trading-report
             chmod +x $out/bin/trading-report
             wrapProgram $out/bin/trading-report \
-              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
 
             # Rename notify bot
             mv $out/bin/notify_telegram.py $out/bin/trading-notify
             chmod +x $out/bin/trading-notify
             wrapProgram $out/bin/trading-notify \
-              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
 
             # Transaction debugger
             mv $out/bin/debug_tx.py $out/bin/debug-tx
             chmod +x $out/bin/debug-tx
             wrapProgram $out/bin/debug-tx \
-              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]}
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
           '';
         };
 
