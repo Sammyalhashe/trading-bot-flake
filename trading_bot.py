@@ -91,6 +91,7 @@ RISK_PER_TRADE_PCT = float(config.risk_per_trade_pct)
 STOP_LOSS_PCT = 0.05  # Kept for backward compatibility reference
 MAX_POSITION_USD = float(config.max_position_usd)
 MAX_DRAWDOWN_PCT = float(config.max_drawdown_pct)
+DRAWDOWN_COOLDOWN_HOURS = config.drawdown_cooldown_hours
 MIN_ORDER_USD = float(config.min_order_usd)
 ASSET_BLACKLIST = config.asset_blacklist
 MOMENTUM_WINDOW_HOURS = config.momentum_window_hours
@@ -274,6 +275,29 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     held = bal["crypto"]
     state = load_state()
 
+    # Reconcile state: clean up entry_prices for assets we no longer hold
+    stale_keys = []
+    for key in list(state.get("entry_prices", {}).keys()):
+        if not key.startswith(f"{ex_id}:"):
+            continue
+        if key.endswith(":SHORT"):
+            # Clean up short entries if strategy doesn't support shorts
+            if not strategy.enables_short:
+                stale_keys.append(key)
+            continue
+        # Extract asset from key format "ExecutorId:ASSET-USDC"
+        product_id_part = key[len(f"{ex_id}:"):]
+        asset_part = product_id_part.split("-")[0]
+        balance = held.get(asset_part, 0.0)
+        if balance <= 0:
+            stale_keys.append(key)
+    if stale_keys:
+        for key in stale_keys:
+            reason = "strategy disables shorts" if key.endswith(":SHORT") else "asset no longer held (manual sell?)"
+            logging.warning(f"[{ex_id}] Removing orphaned state entry '{key}' — {reason}")
+            clear_entry_price(ex_id, key[len(f"{ex_id}:"):])
+        state = load_state()  # reload after cleanup
+
     # Calculate local value
     ex_value = cash
     for asset, amt in held.items():
@@ -301,7 +325,33 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     # Drawdown guard: skip buys if drawdown exceeds limit
     if drawdown_pct >= MAX_DRAWDOWN_PCT:
-        logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Pausing new buys.")
+        # Check if cooldown period has elapsed — reset peak to re-enable trading
+        dd_key = f"drawdown_since:{ex_id}"
+        dd_since = state.get(dd_key)
+        if dd_since is None:
+            # First time detecting drawdown — record timestamp
+            state[dd_key] = time.time()
+            save_state(state)
+            logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Pausing new buys.")
+        else:
+            hours_paused = (time.time() - dd_since) / 3600
+            if hours_paused >= DRAWDOWN_COOLDOWN_HOURS:
+                # Cooldown elapsed — reset peak to current value
+                logging.warning(f"[{ex_id}] Drawdown pause active for {hours_paused:.0f}h (limit {DRAWDOWN_COOLDOWN_HOURS}h). Resetting peak to ${ex_value:,.2f} to re-enable trading.")
+                save_peak_value(ex_value, ex_id)
+                peak = ex_value
+                drawdown_pct = 0
+                # Clear the drawdown timestamp
+                state.pop(dd_key, None)
+                save_state(state)
+            else:
+                logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Paused for {hours_paused:.1f}h (resets after {DRAWDOWN_COOLDOWN_HOURS}h).")
+    else:
+        # Not in drawdown — clear any previous drawdown timestamp
+        dd_key = f"drawdown_since:{ex_id}"
+        if dd_key in state:
+            state.pop(dd_key)
+            save_state(state)
 
     if reset_to_usdc:
         for asset, amount in held.items():
@@ -434,11 +484,20 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             if not price_data: continue
             price = float(price_data['price'])
 
+            # Skip dust balances too small to trade
+            if amt * price < float(MIN_ORDER_USD):
+                continue
+
             entry_key = f"{ex_id}:{product_id}"
             entry = state.get("entry_prices", {}).get(entry_key)
 
             if not entry:
-                logging.warning(f"[{ex_id}] Holding {asset} ({amt:.6f}) has no entry price in state — position is unmanaged. Add entry manually or sell.")
+                # Auto-adopt: set current price as entry so the position gets managed
+                logging.warning(f"[{ex_id}] Auto-adopting unmanaged {asset} ({amt:.6f}) at current price ${price:,.2f}")
+                update_entry_price(ex_id, product_id, price)
+                state = load_state()
+                entry = price
+                # Skip exit checks this cycle — let it establish a HWM first
                 continue
 
             # --- Fetch candle data once for trailing stop ATR and trend exit ---
@@ -467,13 +526,26 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             if sell_trigger:
                 logging.info(f"[{ex_id}] 🚨 {reason}")
                 sell_amount = amt * sell_ratio
+                is_stop_loss = "stop" in reason.lower()
                 result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+                # Fallback to market order for stop losses if limit fails
+                if not result and is_stop_loss:
+                    logging.warning(f"[{ex_id}] Limit sell failed for stop loss on {asset}, falling back to market order")
+                    result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
                 if result:
                     # Confirm fill and get actual exit price
                     exit_price = price  # default to requested price
                     if isinstance(result, dict) and result.get("success") is False:
-                        logging.warning(f"[{ex_id}] Sell {asset} failed: {result.get('error', 'unknown')}")
-                        continue
+                        # Also try market order fallback for stop losses
+                        if is_stop_loss:
+                            logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Falling back to market order.")
+                            result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
+                            if not result or (isinstance(result, dict) and result.get("success") is False):
+                                logging.error(f"[{ex_id}] Market order fallback also failed for {asset}")
+                                continue
+                        else:
+                            logging.warning(f"[{ex_id}] Sell {asset} failed: {result.get('error', 'unknown')}")
+                            continue
                     if isinstance(result, dict) and result.get("confirmed"):
                         logging.info(f"[{ex_id}] Sell {asset} confirmed on-chain at ${price:,.2f}")
                     elif isinstance(result, dict):
