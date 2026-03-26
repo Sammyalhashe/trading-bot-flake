@@ -59,6 +59,9 @@ class TradingConfig:
     mr_trailing_stop_pct: Decimal
     mr_time_exit_candles: int
 
+    # WebSocket Mode
+    ws_scan_interval: int
+
     # Asset Mapping (for rebranded/bridged tokens)
     asset_mapping: dict[str, str]
 
@@ -116,6 +119,9 @@ class TradingConfig:
             mr_bollinger_std=float(os.getenv("MR_BOLLINGER_STD", "2.0")),
             mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.05")),
             mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "24")),
+
+            # WebSocket Mode
+            ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "180")),
 
             # Asset Configuration
             asset_blacklist=["DOGE", "SHLD", "SHIB"],

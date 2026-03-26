@@ -221,6 +221,11 @@ class CoinbaseExecutor:
             return self.request("POST", "/api/v3/brokerage/orders", payload)
         return {"success": True, "order_id": order_id}
 
+    def build_ws_jwt(self):
+        """Build a JWT for WebSocket authentication (empty service/URI per Coinbase WS docs)."""
+        api_key_name, private_key = self._get_credentials()
+        return self._build_jwt(api_key_name, private_key, "", " ")
+
     def get_supported_assets(self):
         """Return list of assets supported by Coinbase for trading."""
         # For now, return the fixed list used in the trading bot.

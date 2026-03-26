@@ -831,8 +831,172 @@ def _run_bot(reset_to_usdc=False):
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
     logging.info(f"==================")
 
+def run_ws_mode():
+    """Run bot in WebSocket mode for real-time exit checks."""
+    import asyncio
+    from core import CoinbaseWSClient
+
+    if not acquire_run_lock():
+        logging.warning("Another bot instance is already running, exiting.")
+        return
+    try:
+        cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+
+        # In-memory snapshots refreshed each scan cycle — ticks never hit
+        # the filesystem or REST API unless an exit is actually triggered.
+        _candle_cache = {}   # product_id -> df
+        _state_cache = {}    # full state dict
+        _held_entries = {}   # entry_key -> entry_price (fast tick filter)
+        _balances = {}       # asset -> amount
+
+        def _refresh_snapshots():
+            """Reload state, balances, and candles from source of truth."""
+            state = load_state()
+            _state_cache.clear()
+            _state_cache.update(state)
+
+            bal = cb_executor.get_balances()
+            _balances.clear()
+            _balances.update(bal.get("crypto", {}))
+
+            _held_entries.clear()
+            ex_id = "CoinbaseExecutor"
+            for key, entry_price in state.get("entry_prices", {}).items():
+                if key.startswith(f"{ex_id}:") and not key.endswith(":SHORT"):
+                    _held_entries[key] = entry_price
+
+            # Pre-populate candle cache for held assets
+            _candle_cache.clear()
+            for key in _held_entries:
+                product_id = key[len(f"{ex_id}:"):]
+                df = cb_executor.get_market_data(product_id, LONG_WINDOW)
+                if df is not None:
+                    _candle_cache[product_id] = df
+
+        def on_tick(product_id, price):
+            ex_id = "CoinbaseExecutor"
+            entry_key = f"{ex_id}:{product_id}"
+
+            # Fast path: skip products we don't hold (no I/O)
+            entry = _held_entries.get(entry_key)
+            if entry is None:
+                return
+
+            asset = product_id.split("-")[0]
+            amt = _balances.get(asset, 0)
+            if amt * price < float(MIN_ORDER_USD):
+                return  # dust
+
+            df = _candle_cache.get(product_id)
+            if df is None:
+                return  # no candles yet, wait for next scan cycle
+
+            state = _state_cache
+            hwm = state.get("high_water_marks", {}).get(entry_key, entry)
+            if price > hwm:
+                hwm = price
+                state.setdefault("high_water_marks", {})[entry_key] = hwm
+                save_state(state)
+
+            tp_flags = state.get("take_profit_flags", {}).get(
+                entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+            )
+
+            sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
+                asset, product_id, df, price, entry, hwm, tp_flags, state, entry_key
+            )
+
+            if not sell_trigger:
+                return
+
+            state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
+            save_state(state)
+
+            logging.info(f"[WS] {reason}")
+            # Fetch fresh balance for the actual sell amount
+            fresh_bal = cb_executor.get_balances()
+            amt = fresh_bal.get("crypto", {}).get(asset, amt)
+            sell_amount = amt * sell_ratio
+            is_stop_loss = "stop" in reason.lower()
+            result = cb_executor.place_limit_order(
+                product_id, 'SELL', price, amount_base_currency=sell_amount
+            )
+            if not result and is_stop_loss:
+                logging.warning(f"[WS] Limit sell failed for stop loss on {asset}, "
+                                "falling back to market order")
+                result = cb_executor.place_market_order(
+                    product_id, 'SELL', amount_base_currency=sell_amount
+                )
+            if result:
+                exit_price = price
+                if isinstance(result, dict) and result.get("success") is False:
+                    if is_stop_loss:
+                        result = cb_executor.place_market_order(
+                            product_id, 'SELL', amount_base_currency=sell_amount
+                        )
+                        if not result or (isinstance(result, dict) and result.get("success") is False):
+                            logging.error(f"[WS] Market order fallback also failed for {asset}")
+                            return
+                    else:
+                        return
+                logging.info(f"[WS] Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
+                if entry:
+                    fee_cost = entry * sell_amount * ROUND_TRIP_FEE_PCT
+                    pnl = (exit_price - entry) * sell_amount - fee_cost
+                    record_trade(pnl > 0, pnl)
+                    logging.info(f"[WS] PnL: ${pnl:+.2f}")
+                if sell_ratio == 1.0:
+                    clear_entry_price("CoinbaseExecutor", product_id)
+                    del _held_entries[entry_key]
+                    _balances.pop(asset, None)
+
+        def on_scan_cycle():
+            logging.info("[WS] Running periodic full scan...")
+            _run_bot()
+            _refresh_snapshots()
+            # Update WS subscriptions to match current holdings
+            held_products = [k.split(":", 1)[1] for k in _held_entries]
+            if held_products:
+                client.update_subscriptions(
+                    list(set(product_ids + held_products))
+                )
+
+        # Build product IDs for subscription
+        supported = cb_executor.get_supported_assets()
+        product_ids = [get_data_product_id(a) for a in supported
+                       if not is_asset_blacklisted(a)]
+
+        # Initial snapshot before WS connects
+        _refresh_snapshots()
+
+        shutdown_event = asyncio.Event()
+
+        def _signal_shutdown(signum, frame):
+            logging.info("Shutdown signal received, stopping WS mode...")
+            shutdown_event.set()
+
+        signal.signal(signal.SIGTERM, _signal_shutdown)
+        signal.signal(signal.SIGINT, _signal_shutdown)
+
+        client = CoinbaseWSClient(
+            jwt_builder=cb_executor.build_ws_jwt,
+            product_ids=product_ids,
+            on_tick=on_tick,
+            on_scan_cycle=on_scan_cycle,
+            scan_interval=config.ws_scan_interval,
+            shutdown_event=shutdown_event,
+        )
+
+        logging.info(f"Starting WebSocket mode (scan every {config.ws_scan_interval}s)")
+        asyncio.run(client.run())
+    finally:
+        release_run_lock()
+
+
 if __name__ == "__main__":
-    if "--report" in sys.argv:
+    if "--ws" in sys.argv:
+        run_ws_mode()
+    elif "--report" in sys.argv:
         perf = get_performance()
         total = perf.get("total_trades", 0)
         wins = perf.get("winning_trades", 0)
