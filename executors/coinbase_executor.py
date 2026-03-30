@@ -56,14 +56,27 @@ class CoinbaseExecutor:
             all_accounts.extend(data['accounts'])
             if not data.get('has_next'): break
             path = f"/api/v3/brokerage/accounts?cursor={data['cursor']}"
-        
+
         balances = {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}}
+        DUST_THRESHOLD_USD = 5.0  # Ignore balances worth less than $5
+
         for acc in all_accounts:
             cur, val = acc['currency'], float(acc['available_balance']['value'])
             if cur in balances['cash']:
                 balances['cash'][cur] = val
             elif val > 0:
-                balances['crypto'][cur] = val
+                # Always include ETH/WETH regardless of amount (needed for gas)
+                if cur in ('WETH', 'ETH'):
+                    balances['crypto'][cur] = val
+                else:
+                    # Filter out dust: only include if worth more than threshold
+                    details = self.get_product_details(f"{cur}-USDC")
+                    if details and 'price' in details:
+                        usd_value = val * float(details['price'])
+                        if usd_value >= DUST_THRESHOLD_USD:
+                            balances['crypto'][cur] = val
+                        else:
+                            logging.debug(f"Ignoring dust balance: {cur} {val} (~${usd_value:.2f})")
         return balances
 
     def get_market_data(self, product_id, window):
