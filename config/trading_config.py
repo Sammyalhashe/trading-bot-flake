@@ -59,6 +59,9 @@ class TradingConfig:
     mr_trailing_stop_pct: Decimal
     mr_time_exit_candles: int
 
+    # Concentration Guard
+    max_concurrent_positions: int
+
     # WebSocket Mode
     ws_scan_interval: int
 
@@ -111,14 +114,17 @@ class TradingConfig:
             enable_short=os.getenv("ENABLE_SHORT", "true").lower() == "true",
 
             # Strategy Selection
-            strategy=os.getenv("STRATEGY", "trend_following"),
+            strategy=os.getenv("STRATEGY", "auto"),
 
             # Mean-Reversion Parameters
-            mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "30")),
+            mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "25")),
             mr_bollinger_period=int(os.getenv("MR_BOLLINGER_PERIOD", "20")),
             mr_bollinger_std=float(os.getenv("MR_BOLLINGER_STD", "2.0")),
-            mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.05")),
-            mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "24")),
+            mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.08")),
+            mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "10")),
+
+            # Concentration Guard
+            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
 
             # WebSocket Mode
             ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "180")),
@@ -141,7 +147,7 @@ class TradingConfig:
         errors = []
 
         # Strategy validation
-        valid_strategies = ["trend_following", "mean_reversion"]
+        valid_strategies = ["trend_following", "mean_reversion", "auto"]
         if self.strategy not in valid_strategies:
             errors.append(f"Invalid strategy '{self.strategy}', must be one of {valid_strategies}")
 

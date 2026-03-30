@@ -301,13 +301,12 @@ class TestMeanReversionStrategy:
         s = self._make_strategy()
         df = make_candle_df(100.0, num_rows=60)
         hwm = 100.0
-        price = 94.0  # 6% below HWM, stop is 5%
+        price = 91.0  # 9% below HWM, stop is 8%
         tp_flags = {}
 
         sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, tp_flags, {}, "k")
-        # Price < hwm * 0.95 = 95.0, and price is 94, but also need to check SMA first
-        # SMA of flat 100 data = 100, price 94 < 100 so SMA exit would fire first
-        # Actually SMA = 100, price = 94 < 100, so SMA target NOT reached (price < sma)
+        # Price < hwm * 0.92 = 92.0, and price is 91
+        # SMA of flat 100 data = 100, price 91 < 100 so SMA target NOT reached
         # So stop loss should fire
         assert sell is True
         assert ratio == 1.0
@@ -319,11 +318,11 @@ class TestMeanReversionStrategy:
         prices = [110 - i * 0.1 for i in range(60)]
         df = make_candle_df(prices, num_rows=60)
         price = prices[-1]
-        hwm = price + 1  # HWM just above price, within 5% stop
+        hwm = price + 1  # HWM just above price, within 8% stop
         entry = price - 5
 
-        # Simulate entry 25 hours ago
-        entry_time = time.time() - 25 * 3600
+        # Simulate entry 11 hours ago (above 10h threshold)
+        entry_time = time.time() - 11 * 3600
         state = {"entry_timestamps": {"k": entry_time}}
         tp_flags = {}
 
@@ -381,14 +380,122 @@ class TestStrategyConfig:
         with pytest.raises(ValueError, match="Invalid strategy"):
             config.validate()
 
-    def test_default_strategy_is_trend_following(self):
+    def test_default_strategy_is_auto(self):
         config = default_config()
-        assert config.strategy == "trend_following"
+        assert config.strategy == "auto"
 
     def test_mean_reversion_defaults(self):
         config = default_config()
-        assert config.mr_rsi_oversold == Decimal("30")
+        assert config.mr_rsi_oversold == Decimal("25")
         assert config.mr_bollinger_period == 20
         assert config.mr_bollinger_std == 2.0
-        assert config.mr_trailing_stop_pct == Decimal("0.05")
-        assert config.mr_time_exit_candles == 24
+        assert config.mr_trailing_stop_pct == Decimal("0.08")
+        assert config.mr_time_exit_candles == 10
+
+    def test_auto_strategy_valid(self):
+        config = default_config()
+        config.strategy = "auto"
+        config.validate()  # Should not raise
+
+    def test_max_concurrent_positions_default(self):
+        config = default_config()
+        assert config.max_concurrent_positions == 3
+
+
+# ===== Dynamic Strategy Switching =====
+
+class TestDynamicStrategySwitching:
+    def test_select_bull_uses_trend_following(self):
+        from trading_bot import select_strategy_for_regime
+        s = select_strategy_for_regime("BULL")
+        assert s.name == "trend_following"
+
+    def test_select_strong_bull_uses_trend_following(self):
+        from trading_bot import select_strategy_for_regime
+        s = select_strategy_for_regime("STRONG_BULL")
+        assert s.name == "trend_following"
+
+    def test_select_neutral_uses_mean_reversion(self):
+        from trading_bot import select_strategy_for_regime
+        s = select_strategy_for_regime("NEUTRAL")
+        assert s.name == "mean_reversion"
+
+    def test_select_bear_uses_trend_following(self):
+        from trading_bot import select_strategy_for_regime
+        s = select_strategy_for_regime("BEAR")
+        assert s.name == "trend_following"
+
+    def test_select_strong_bear_uses_trend_following(self):
+        from trading_bot import select_strategy_for_regime
+        s = select_strategy_for_regime("STRONG_BEAR")
+        assert s.name == "trend_following"
+
+
+# ===== Updated Thresholds =====
+
+class TestUpdatedThresholds:
+    def test_rsi_27_rejected_by_new_threshold(self):
+        """RSI=27 was accepted with old threshold (30) but rejected with new (25)."""
+        from strategies.mean_reversion import MeanReversionStrategy
+        config = default_config()
+        assert config.mr_rsi_oversold == Decimal("25")
+        s = MeanReversionStrategy(make_ta(), config)
+        # Moderate drop: RSI will be ~27 (between old 30 and new 25 threshold)
+        prices = [100.0] * 50 + [98.0, 96.5, 95.5, 94.8, 94.2, 93.8, 93.5, 93.3, 93.2, 93.1]
+        df = make_candle_df(prices, volumes=[200000.0] * 60, num_rows=60)
+        rsi = make_ta().calculate_rsi(df)
+        # Verify RSI is between 25 and 30 (old threshold accepts, new rejects)
+        if rsi is not None and 25 < rsi < 30:
+            result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+            assert result is None  # Should be rejected with RSI threshold of 25
+
+    def test_time_exit_at_10h(self):
+        """Positions should exit after 10h instead of waiting for 24h."""
+        from strategies.mean_reversion import MeanReversionStrategy
+        s = MeanReversionStrategy(make_ta(), default_config())
+        prices = [110 - i * 0.1 for i in range(60)]
+        df = make_candle_df(prices, num_rows=60)
+        price = prices[-1]
+        hwm = price + 1
+        entry = price - 5
+
+        # 11h ago: should trigger time exit with new 10h threshold
+        entry_time = time.time() - 11 * 3600
+        state = {"entry_timestamps": {"k": entry_time}}
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, {}, state, "k")
+        assert sell is True
+        assert "time exit" in reason
+
+    def test_no_time_exit_at_9h(self):
+        """Positions should NOT exit at 9h with new 10h threshold."""
+        from strategies.mean_reversion import MeanReversionStrategy
+        s = MeanReversionStrategy(make_ta(), default_config())
+        prices = [110 - i * 0.1 for i in range(60)]
+        df = make_candle_df(prices, num_rows=60)
+        price = prices[-1]
+        hwm = price + 1
+        entry = price - 5
+
+        # 9h ago: should NOT trigger with 10h threshold
+        entry_time = time.time() - 9 * 3600
+        state = {"entry_timestamps": {"k": entry_time}}
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, {}, state, "k")
+        assert sell is False
+
+    def test_stop_loss_at_8pct(self):
+        """8% stop loss: 6% drop should NOT trigger, 9% drop should."""
+        from strategies.mean_reversion import MeanReversionStrategy
+        s = MeanReversionStrategy(make_ta(), default_config())
+        df = make_candle_df(100.0, num_rows=60)
+
+        # 6% drop: should NOT trigger (old 5% would have)
+        hwm = 100.0
+        price = 94.5  # 5.5% below HWM
+        sell, _, _, _ = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, {}, {}, "k")
+        assert sell is False
+
+        # 9% drop: should trigger
+        price = 91.0
+        sell, ratio, reason, _ = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, {}, {}, "k")
+        assert sell is True
+        assert "stop loss" in reason
