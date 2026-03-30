@@ -994,13 +994,23 @@ class EthereumExecutor:
                 token_in = usdc_addr
                 token_out = token_addr
             else:  # SELL
+                # Handle dust amounts (e.g., after partial sells or small balances)
+                if amount_base_currency is not None and float(amount_base_currency) <= 0:
+                    logging.info(f"EthereumExecutor: Skipping SELL for {product_id} - dust amount ({amount_base_currency})")
+                    return {"success": True, "tx_hash": "dust_skip"}
+
                 if not amount_base_currency and amount_quote_currency:
                     # Calculate amount_base_currency from amount_quote_currency using current price
                     details = self.get_product_details(product_id)
-                    if details and 'price' in details:
-                        amount_base_currency = float(amount_quote_currency) / float(details['price'])
+                    if details and "price" in details and float(details["price"]) > 0:
+                        amount_base_currency = float(amount_quote_currency) / float(details["price"])
                         logging.info(f"EthereumExecutor: Calculated sell amount_base_currency={amount_base_currency} from quote={amount_quote_currency} @ price={details['price']}")
-                
+
+                # Handle case where calculation still resulted in 0 or negative
+                if amount_base_currency is not None and float(amount_base_currency) <= 0:
+                    logging.info(f"EthereumExecutor: Skipping SELL for {product_id} - calculated dust amount ({amount_base_currency})")
+                    return {"success": True, "tx_hash": "dust_skip"}
+
                 if not amount_base_currency:
                     logging.error("SELL requires amount_base_currency or amount_quote_currency (with price)")
                     return None
