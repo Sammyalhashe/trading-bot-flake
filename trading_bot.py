@@ -68,8 +68,28 @@ logging.info(f"Trading mode: {exec_config.trading_mode}")
 
 # Import strategy system
 from strategies import create_strategy
-strategy = create_strategy(config.strategy, technical_analysis, config)
-logging.info(f"Strategy: {strategy.name}")
+
+# Cache both strategy instances for dynamic switching
+_strategies = {
+    "trend_following": create_strategy("trend_following", technical_analysis, config),
+    "mean_reversion": create_strategy("mean_reversion", technical_analysis, config),
+}
+
+def select_strategy_for_regime(full_regime):
+    """Select the best strategy for the current market regime."""
+    if full_regime in ("STRONG_BULL", "BULL"):
+        return _strategies["trend_following"]
+    elif full_regime == "NEUTRAL":
+        return _strategies["mean_reversion"]
+    else:  # BEAR, STRONG_BEAR
+        return _strategies["trend_following"]
+
+if config.strategy == "auto":
+    strategy = _strategies["trend_following"]  # default until first regime detection
+    logging.info("Strategy: auto (dynamic regime-adaptive switching)")
+else:
+    strategy = _strategies[config.strategy]
+    logging.info(f"Strategy: {strategy.name} (fixed)")
 
 # Import specialized executors (after config loaded)
 from executors import CoinbaseExecutor, EthereumExecutor, validate_executor
@@ -270,7 +290,24 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
 
-    bal = executor.get_balances()
+    # Pre-load state to discover tokens we hold in state but might not scan by default
+    state = load_state()
+    extra_tokens = []
+    for key in state.get("entry_prices", {}):
+        if not key.startswith(f"{ex_id}:") or key.endswith(":SHORT"):
+            continue
+        # Extract asset symbol from "ExecutorId:ASSET-USDC"
+        asset_sym = key[len(f"{ex_id}:"):].split("-")[0]
+        if asset_sym not in ("USD", "USDC"):
+            extra_tokens.append(asset_sym)
+
+    # EthereumExecutor only scans USDC/WETH by default — pass extra tokens
+    # so it also checks balances for assets we hold in state.
+    try:
+        bal = executor.get_balances(extra_tokens=extra_tokens) if extra_tokens else executor.get_balances()
+    except TypeError:
+        # Executor doesn't support extra_tokens (e.g. CoinbaseExecutor scans all)
+        bal = executor.get_balances()
     cash = bal["cash"].get("USDC", 0.0)
     held = bal["crypto"]
     state = load_state()
@@ -397,10 +434,17 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     asset_candidates = strategy.rank_candidates(asset_candidates)
 
+    # Concurrent position guard: count non-stablecoin holdings for this executor
+    current_positions = sum(1 for a in held if a not in ("USD", "USDC") and held[a] > 0)
+    max_positions = config.max_concurrent_positions
+
     available_usdc = cash
     available_short_usdc = cash  # Separate pool for short positions
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
+        if current_positions >= max_positions:
+            logging.info(f"[{ex_id}] Skipping {asset}: at max concurrent positions ({current_positions}/{max_positions})")
+            continue
         try:
             price_data = data_provider.get_product_details(product_id)
             price = float(price_data['price'])
@@ -430,6 +474,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                         if result.get("confirmed"):
                             update_entry_price(ex_id, product_id, price)
                             available_usdc -= buy_size
+                            current_positions += 1
                             logging.info(f"[{ex_id}] Buy {asset} confirmed on-chain at ${price:,.2f}")
                         elif result.get("success") is False:
                             logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
@@ -441,6 +486,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                 if filled_price:
                                     update_entry_price(ex_id, product_id, filled_price)
                                     available_usdc -= buy_size
+                                    current_positions += 1
                                     logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
                                 else:
                                     logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
@@ -448,6 +494,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                 # Paper mode — use requested price
                                 update_entry_price(ex_id, product_id, price)
                                 available_usdc -= buy_size
+                                current_positions += 1
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
@@ -533,6 +580,12 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     logging.warning(f"[{ex_id}] Limit sell failed for stop loss on {asset}, falling back to market order")
                     result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
                 if result:
+                    # Handle dust_skip — position is effectively gone, clean up state
+                    if isinstance(result, dict) and result.get("tx_hash") == "dust_skip":
+                        logging.warning(f"[{ex_id}] {asset} sell was dust-skipped (amount too small). Clearing entry price.")
+                        clear_entry_price(ex_id, product_id)
+                        state = load_state()
+                        continue
                     # Confirm fill and get actual exit price
                     exit_price = price  # default to requested price
                     if isinstance(result, dict) and result.get("success") is False:
@@ -808,6 +861,16 @@ def _run_bot(reset_to_usdc=False):
 
         full_regime = market_regime  # Same as market_regime in single-asset mode
         logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
+
+    # Dynamic strategy switching based on regime
+    global strategy
+    if config.strategy == "auto":
+        prev = strategy.name
+        strategy = select_strategy_for_regime(full_regime)
+        if strategy.name != prev:
+            logging.info(f"Strategy switched: {prev} → {strategy.name} (regime: {full_regime})")
+        else:
+            logging.info(f"Strategy: {strategy.name} (regime: {full_regime})")
 
     aggregate_value = 0
     for ex in active_executors:
