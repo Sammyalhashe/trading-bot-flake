@@ -82,7 +82,7 @@ class TradingConfig:
             ma_long_window=int(os.getenv("LONG_WINDOW", "50")),
 
             # Risk Management
-            portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.15")),
+            portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.70")),
             short_risk_pct=Decimal(os.getenv("SHORT_RISK_PERCENTAGE", "0.05")),
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.95")),
             max_position_usd=Decimal(os.getenv("MAX_POSITION_USD", "5000")),
@@ -124,7 +124,7 @@ class TradingConfig:
             mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "10")),
 
             # Concentration Guard
-            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
+            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "7")),
 
             # WebSocket Mode
             ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "180")),
@@ -132,7 +132,7 @@ class TradingConfig:
             # Asset Configuration
             asset_blacklist=["DOGE", "SHLD", "SHIB"],
             momentum_window_hours=24,
-            top_momentum_count=3,
+            top_momentum_count=int(os.getenv("TOP_MOMENTUM_COUNT", "4")),
 
             # Asset Mapping
             asset_mapping={

@@ -399,7 +399,7 @@ class TestStrategyConfig:
 
     def test_max_concurrent_positions_default(self):
         config = default_config()
-        assert config.max_concurrent_positions == 3
+        assert config.max_concurrent_positions == 7
 
 
 # ===== Dynamic Strategy Switching =====
