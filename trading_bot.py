@@ -106,7 +106,6 @@ SHORT_WINDOW = config.ma_short_window
 LONG_WINDOW = config.ma_long_window
 PORTFOLIO_RISK_PERCENTAGE = float(config.portfolio_risk_pct)
 RISK_PER_TRADE_PCT = float(config.risk_per_trade_pct)
-STOP_LOSS_PCT = 0.05  # Kept for backward compatibility reference
 MAX_DRAWDOWN_PCT = float(config.max_drawdown_pct)
 DRAWDOWN_COOLDOWN_HOURS = config.drawdown_cooldown_hours
 MIN_ORDER_USD = float(config.min_order_usd)
@@ -659,14 +658,18 @@ def _run_bot(reset_to_usdc=False):
         btc_s, btc_l = analyze_trend(btc_df)
 
         if btc_s and btc_l:
+            btc_price = btc_df['close'].iloc[-1] if len(btc_df) > 0 else None
+            ma_spread_pct = ((btc_s / btc_l) - 1) * 100
             if btc_s > btc_l * 1.002:
                 btc_macro = "BULL"
             elif btc_s < btc_l * 0.998:
                 btc_macro = "BEAR"
             else:
                 btc_macro = "FLAT"
+            logging.info(f"BTC Macro: ${btc_price:,.0f} | MA{SHORT_WINDOW}: ${btc_s:,.0f} | MA{LONG_WINDOW}: ${btc_l:,.0f} | Spread: {ma_spread_pct:+.2f}% → {btc_macro}")
         else:
             btc_macro = "BULL"  # Default when insufficient data
+            logging.warning("BTC Macro: Insufficient data, defaulting to BULL")
 
         # 2. ETH/BTC Rotation Signal
         rotation_signal = compute_eth_btc_ratio(data_provider)
@@ -687,8 +690,24 @@ def _run_bot(reset_to_usdc=False):
         # 4. Map to legacy BULL/BEAR for backward compatibility
         market_regime = regime_to_legacy(full_regime)
 
-        logging.info(f"Market Regime: {full_regime} (BTC: {btc_macro} | Rotation: {rotation_signal})")
-        logging.info(f"Legacy regime (passed to strategy): {market_regime}")
+        # Enhanced regime logging with reasoning
+        regime_explanation = {
+            "STRONG_BULL": "BTC trending up + Alts outperforming (ETH leading)",
+            "BULL": "BTC trending up + BTC outperforming (capital in BTC)",
+            "NEUTRAL": "BTC sideways or conflicting signals",
+            "BEAR": "BTC trending down + BTC outperforming (defensive)",
+            "STRONG_BEAR": "BTC trending down + Alts dumping harder (high risk)"
+        }
+        explanation = regime_explanation.get(full_regime, "Unknown regime")
+
+        dom_info = ""
+        if btc_dominance:
+            dom_info = f" | BTC.D: {btc_dominance['btc_dominance']:.1f}% ({btc_dominance['regime']})"
+
+        logging.info(f"━━━ Market Regime: {full_regime} ━━━")
+        logging.info(f"    Reason: {explanation}")
+        logging.info(f"    Signals: BTC {btc_macro} | Rotation {rotation_signal}{dom_info}")
+        logging.info(f"    Strategy input: {market_regime}")
 
     else:
         # Single-asset regime (legacy behavior)
