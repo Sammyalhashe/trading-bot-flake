@@ -28,7 +28,6 @@ class SupertrendStrategy:
         self.ta = ta
         self.config = config
         self.name = "supertrend"
-        self.enables_short = False
 
     def _get_supertrend_consensus(self, df) -> tuple[int, int]:
         """Calculate consensus across all Supertrend indicators.
@@ -157,10 +156,3 @@ class SupertrendStrategy:
                 tp_flags["trend_exit_hit"] = True
 
         return sell_trigger, sell_ratio, reason, tp_flags
-
-    def scan_short_entry(self, asset: str, product_id: str, df,
-                         market_regime: str, full_regime: str) -> dict | None:
-        return None
-
-    def rank_short_candidates(self, candidates: list[dict]) -> list[dict]:
-        return []

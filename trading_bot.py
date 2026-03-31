@@ -102,14 +102,11 @@ TRADING_MODE = exec_config.trading_mode
 ENABLE_ETHEREUM = exec_config.ethereum_enabled
 ETH_RPC_URL = exec_config.eth_rpc_url
 ETH_PRIVATE_KEY = exec_config.eth_private_key
-ENABLE_SHORT = config.enable_short
 SHORT_WINDOW = config.ma_short_window
 LONG_WINDOW = config.ma_long_window
 PORTFOLIO_RISK_PERCENTAGE = float(config.portfolio_risk_pct)
-SHORT_RISK_PERCENTAGE = float(config.short_risk_pct)
 RISK_PER_TRADE_PCT = float(config.risk_per_trade_pct)
 STOP_LOSS_PCT = 0.05  # Kept for backward compatibility reference
-MAX_POSITION_USD = float(config.max_position_usd)
 MAX_DRAWDOWN_PCT = float(config.max_drawdown_pct)
 DRAWDOWN_COOLDOWN_HOURS = config.drawdown_cooldown_hours
 MIN_ORDER_USD = float(config.min_order_usd)
@@ -294,7 +291,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     state = load_state()
     extra_tokens = []
     for key in state.get("entry_prices", {}):
-        if not key.startswith(f"{ex_id}:") or key.endswith(":SHORT"):
+        if not key.startswith(f"{ex_id}:"):
             continue
         # Extract asset symbol from "ExecutorId:ASSET-USDC"
         asset_sym = key[len(f"{ex_id}:"):].split("-")[0]
@@ -327,11 +324,6 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     for key in list(state.get("entry_prices", {}).keys()):
         if not key.startswith(f"{ex_id}:"):
             continue
-        if key.endswith(":SHORT"):
-            # Clean up short entries if strategy doesn't support shorts
-            if not strategy.enables_short:
-                stale_keys.append(key)
-            continue
         # Extract asset from key format "ExecutorId:ASSET-USDC"
         product_id_part = key[len(f"{ex_id}:"):]
         asset_part = product_id_part.split("-")[0]
@@ -341,8 +333,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             stale_keys.append(key)
     if stale_keys:
         for key in stale_keys:
-            reason = "strategy disables shorts" if key.endswith(":SHORT") else "asset no longer held (manual sell?)"
-            logging.warning(f"[{ex_id}] Removing orphaned state entry '{key}' — {reason}")
+            logging.warning(f"[{ex_id}] Removing orphaned state entry '{key}' — asset no longer held (manual sell?)")
             clear_entry_price(ex_id, key[len(f"{ex_id}:"):])
         state = load_state()  # reload after cleanup
 
@@ -652,7 +643,7 @@ def _run_bot(reset_to_usdc=False):
             raise
 
     logging.info(f"--- 🤖 Crypto Bot Run ({TRADING_MODE.upper()}) ---")
-    logging.info(f"[Risk] max_position=${MAX_POSITION_USD:,.0f} | max_drawdown={MAX_DRAWDOWN_PCT}% | min_order=${MIN_ORDER_USD:.0f}")
+    logging.info(f"[Risk] max_drawdown={MAX_DRAWDOWN_PCT}% | min_order=${MIN_ORDER_USD:.0f}")
     logging.info(f"[Risk] portfolio_risk={PORTFOLIO_RISK_PERCENTAGE*100:.0f}% | risk_per_trade={RISK_PER_TRADE_PCT*100:.0f}%")
     logging.info(f"Trailing Stop: {TRAILING_STOP_PCT*100:.1f}% | TP1: {TAKE_PROFIT_1_PCT*100:.1f}% ({TAKE_PROFIT_1_SELL_RATIO*100:.0f}% sell) | TP2: {TAKE_PROFIT_2_PCT*100:.1f}% ({TAKE_PROFIT_2_SELL_RATIO*100:.0f}% sell)")
     data_provider = cb_executor
@@ -770,7 +761,7 @@ def _run_bot(reset_to_usdc=False):
     else:
         logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
     logging.info(f"Portfolio Value: ${aggregate_value:,.2f}")
-    logging.info(f"Risk Params: max_pos=${MAX_POSITION_USD:,.0f} | max_dd={MAX_DRAWDOWN_PCT}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
+    logging.info(f"Risk Params: max_dd={MAX_DRAWDOWN_PCT}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
     logging.info(f"==================")
 
@@ -805,7 +796,7 @@ def run_ws_mode():
             _held_entries.clear()
             ex_id = "CoinbaseExecutor"
             for key, entry_price in state.get("entry_prices", {}).items():
-                if key.startswith(f"{ex_id}:") and not key.endswith(":SHORT"):
+                if key.startswith(f"{ex_id}:"):
                     _held_entries[key] = entry_price
 
             # Pre-populate candle cache for held assets
