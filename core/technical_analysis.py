@@ -176,6 +176,80 @@ class TechnicalAnalysis:
         lower = middle - num_std * std
         return middle, upper, lower
 
+    def calculate_supertrend(self, df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> dict | None:
+        """Calculate Supertrend indicator.
+
+        Supertrend creates a dynamic trailing band that flips between support
+        (bullish) and resistance (bearish) based on ATR-scaled volatility.
+
+        When price closes above the upper band, the trend flips bullish.
+        When price closes below the lower band, the trend flips bearish.
+        The band then locks on one side until the trend reverses.
+
+        Args:
+            df: DataFrame with 'high', 'low', 'close' columns
+            period: ATR period (default: 10)
+            multiplier: ATR multiplier for band width (default: 3.0)
+
+        Returns:
+            dict with 'direction' (1=bullish, -1=bearish) and 'value' (band level),
+            or None if insufficient data
+        """
+        if df is None or len(df) < period + 1:
+            return None
+
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+
+        # Calculate ATR using true range
+        tr = [high[0] - low[0]]
+        for i in range(1, len(close)):
+            tr.append(max(
+                high[i] - low[i],
+                abs(high[i] - close[i - 1]),
+                abs(low[i] - close[i - 1])
+            ))
+
+        # Rolling ATR
+        atr = [0.0] * len(close)
+        for i in range(period, len(close)):
+            atr[i] = sum(tr[i - period + 1:i + 1]) / period
+
+        # Compute Supertrend
+        upper_band = [0.0] * len(close)
+        lower_band = [0.0] * len(close)
+        direction = [1] * len(close)  # 1 = bullish, -1 = bearish
+        supertrend = [0.0] * len(close)
+
+        for i in range(period, len(close)):
+            mid = (high[i] + low[i]) / 2
+            upper_band[i] = mid + multiplier * atr[i]
+            lower_band[i] = mid - multiplier * atr[i]
+
+            # Clamp bands to prevent them from moving against the trend
+            if i > period:
+                if lower_band[i] < lower_band[i - 1] and close[i - 1] > lower_band[i - 1]:
+                    lower_band[i] = lower_band[i - 1]
+                if upper_band[i] > upper_band[i - 1] and close[i - 1] < upper_band[i - 1]:
+                    upper_band[i] = upper_band[i - 1]
+
+            # Determine direction
+            if i > period:
+                if direction[i - 1] == 1:
+                    direction[i] = 1 if close[i] >= lower_band[i] else -1
+                else:
+                    direction[i] = -1 if close[i] <= upper_band[i] else 1
+
+            supertrend[i] = lower_band[i] if direction[i] == 1 else upper_band[i]
+
+        return {
+            "direction": direction[-1],
+            "value": supertrend[-1],
+            "directions": direction,
+            "values": supertrend,
+        }
+
     def calculate_sma(self, df: pd.DataFrame, period: int = 20) -> float | None:
         """Calculate Simple Moving Average.
 
