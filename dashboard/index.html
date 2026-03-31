@@ -242,9 +242,17 @@
         function populateTimeframes(period) {
             const timeframes = [...new Set(manifest.filter(m => m.period === period).map(m => m.timeframe))];
             const select = document.getElementById('timeframe-select');
+            const previousValue = select.value;
             select.innerHTML = '<option value="">Select timeframe</option>' +
                 timeframes.map(t => `<option value="${t}">${t}</option>`).join('');
-            document.getElementById('strategy-select').innerHTML = '<option value="">Select timeframe first</option>';
+            // Preserve selection if still valid, otherwise reset strategy
+            if (timeframes.includes(previousValue)) {
+                select.value = previousValue;
+                // Also refresh strategies for the preserved timeframe
+                populateStrategies(period, previousValue);
+            } else {
+                document.getElementById('strategy-select').innerHTML = '<option value="">Select timeframe first</option>';
+            }
         }
 
         function populateStrategies(period, timeframe) {
@@ -252,8 +260,13 @@
                 .filter(m => m.period === period && m.timeframe === timeframe)
                 .map(m => m.strategy))];
             const select = document.getElementById('strategy-select');
+            const previousValue = select.value;
             select.innerHTML = '<option value="">Select strategy</option>' +
                 strategies.map(s => `<option value="${s}">${s.replaceAll('_', ' ')}</option>`).join('');
+            // Preserve selection if still valid
+            if (strategies.includes(previousValue)) {
+                select.value = previousValue;
+            }
         }
 
         function loadBacktest(period, timeframe, strategy) {
@@ -304,7 +317,9 @@
                 equitySeries = null;
             }
 
+            // chart.remove() clears the container's inner DOM, so reset it
             const chartDiv = document.getElementById('equity-chart');
+            chartDiv.innerHTML = '';
             chart = LightweightCharts.createChart(chartDiv, {
                 layout: {
                     background: { color: '#131722' },
@@ -351,11 +366,22 @@
                 `<div class="error">⚠️ ${msg}</div>`;
         }
 
+        // Helper: load backtest if all three dropdowns have valid selections
+        function tryLoadBacktest() {
+            const period = document.getElementById('period-select').value;
+            const timeframe = document.getElementById('timeframe-select').value;
+            const strategy = document.getElementById('strategy-select').value;
+            if (period && timeframe && strategy) {
+                loadBacktest(period, timeframe, strategy);
+            }
+        }
+
         // Event listeners
         document.getElementById('period-select').addEventListener('change', e => {
             if (e.target.value) {
                 populateTimeframes(e.target.value);
                 document.getElementById('error-container').innerHTML = '';
+                tryLoadBacktest();
             }
         });
 
@@ -363,15 +389,12 @@
             const period = document.getElementById('period-select').value;
             if (period && e.target.value) {
                 populateStrategies(period, e.target.value);
+                tryLoadBacktest();
             }
         });
 
         document.getElementById('strategy-select').addEventListener('change', e => {
-            const period = document.getElementById('period-select').value;
-            const timeframe = document.getElementById('timeframe-select').value;
-            if (period && timeframe && e.target.value) {
-                loadBacktest(period, timeframe, e.target.value);
-            }
+            tryLoadBacktest();
         });
     </script>
 </body>
