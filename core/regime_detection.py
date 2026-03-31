@@ -118,8 +118,15 @@ class RegimeDetector:
             else:
                 signal = "NEUTRAL_RATIO"  # No clear rotation
 
+            # Enhanced logging with prices and movement details
             ratio_current = merged['eth_btc_ratio'].iloc[-1]
-            logger.info(f"ETH/BTC Ratio: {ratio_current:.5f} | Signal: {signal}")
+            eth_price = merged['eth_close'].iloc[-1]
+            btc_price = merged['btc_close'].iloc[-1]
+            ratio_spread_pct = ((ratio_sma_short / ratio_sma_long) - 1) * 100
+
+            logger.info(f"ETH/BTC Rotation: Ratio={ratio_current:.5f} (ETH ${eth_price:,.0f} / BTC ${btc_price:,.0f})")
+            logger.info(f"    MA{self.ma_short_window}/MA{self.ma_long_window} Spread: {ratio_spread_pct:+.2f}% → {signal}")
+
             return signal
 
         except Exception as e:
