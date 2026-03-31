@@ -351,31 +351,41 @@ class EthereumExecutor:
         except Exception as e:
             logging.debug(f"Could not check balance for {symbol} ({address}): {e}")
 
-    def get_balances(self):
+    def get_balances(self, extra_tokens=None):
         """Fetch ETH and key ERC20 balances on Base. Minimizes RPC calls.
         Uses RPC failover for connection errors."""
         def _do_get_balances():
             if not self.account:
-                return {"cash": {"USDC": 0.0}, "crypto": {}}
+                return {
+                    "available": {"cash": {"USDC": 0.0}, "crypto": {}},
+                    "total": {"cash": {"USDC": 0.0}, "crypto": {}}
+                }
 
-            balances = {"cash": {"USDC": 0.0}, "crypto": {}}
+            # For Ethereum, available and total are the same (no held limit orders)
+            base_balances = {"cash": {"USDC": 0.0}, "crypto": {}}
 
             # 1. Native ETH (Gas) - 1 RPC call
             try:
                 def _fetch_eth_balance():
                     return self.w3.eth.get_balance(self.account.address)
                 eth_bal = retry_rpc_call(_fetch_eth_balance)
-                balances["crypto"]["ETH_NATIVE"] = float(self.w3.from_wei(eth_bal, 'ether'))
+                base_balances["crypto"]["ETH_NATIVE"] = float(self.w3.from_wei(eth_bal, 'ether'))
             except Exception as e:
                 logging.debug(f"Could not fetch native ETH balance: {e}")
 
-            # 2. Only check essential tokens (USDC, WETH) to minimize RPC calls
-            # Other tokens can be checked on-demand if needed
-            for symbol in BALANCE_SCAN_TOKENS:
-                if symbol in TOKENS:
-                    self._check_balance(balances, symbol, TOKENS[symbol])
+            # 2. Only check essential tokens (USDC, WETH) + requested extras
+            tokens_to_scan = set(BALANCE_SCAN_TOKENS)
+            if extra_tokens:
+                tokens_to_scan.update(extra_tokens)
 
-            return balances
+            for symbol in tokens_to_scan:
+                if symbol in TOKENS:
+                    self._check_balance(base_balances, symbol, TOKENS[symbol])
+
+            return {
+                "available": base_balances,
+                "total": base_balances
+            }
 
         return self._call_with_failover(_do_get_balances)
 
