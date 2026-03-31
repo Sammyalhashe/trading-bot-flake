@@ -77,17 +77,18 @@ class TradingConfig:
             trend_asset = "BTC"  # fallback to BTC if invalid
 
         return cls(
-            # Moving Averages
-            ma_short_window=int(os.getenv("SHORT_WINDOW", "20")),
-            ma_long_window=int(os.getenv("LONG_WINDOW", "50")),
+            # Moving Averages — 50/200 is the "golden cross" standard for trend
+            # following. Slower than 20/50 but far fewer false signals in crypto.
+            ma_short_window=int(os.getenv("SHORT_WINDOW", "50")),
+            ma_long_window=int(os.getenv("LONG_WINDOW", "200")),
 
             # Risk Management
-            portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.70")),
+            portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.90")),
             short_risk_pct=Decimal(os.getenv("SHORT_RISK_PERCENTAGE", "0.05")),
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.95")),
-            max_position_usd=Decimal(os.getenv("MAX_POSITION_USD", "5000")),
-            max_drawdown_pct=Decimal(os.getenv("MAX_DRAWDOWN_PCT", "10")),
-            drawdown_cooldown_hours=int(os.getenv("DRAWDOWN_COOLDOWN_HOURS", "24")),
+            max_position_usd=Decimal(os.getenv("MAX_POSITION_USD", "10000")),
+            max_drawdown_pct=Decimal(os.getenv("MAX_DRAWDOWN_PCT", "15")),
+            drawdown_cooldown_hours=int(os.getenv("DRAWDOWN_COOLDOWN_HOURS", "48")),
             min_order_usd=Decimal(os.getenv("MIN_ORDER_USD", "10")),
 
             # Regime Detection
@@ -97,42 +98,43 @@ class TradingConfig:
             allow_btc_in_bear=os.getenv("ALLOW_BTC_IN_BEAR", "true").lower() == "true",
 
             # Technical Indicators
-            rsi_overbought=Decimal(os.getenv("RSI_OVERBOUGHT", "70")),
-            trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.05")),
-            min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "100000")),
+            rsi_overbought=Decimal(os.getenv("RSI_OVERBOUGHT", "75")),
+            trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.07")),
+            min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
 
-            # Fee Configuration
+            # Fee Configuration — Coinbase Advanced taker fee ~0.6% round-trip
             round_trip_fee_pct=Decimal(os.getenv("ROUND_TRIP_FEE_PCT", "0.006")),
 
-            # Take Profit Levels
-            take_profit_1_pct=Decimal(os.getenv("TAKE_PROFIT_1_PCT", "0.10")),
-            take_profit_1_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_1_SELL_RATIO", "0.33")),
-            take_profit_2_pct=Decimal(os.getenv("TAKE_PROFIT_2_PCT", "0.20")),
-            take_profit_2_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_2_SELL_RATIO", "0.50")),
+            # Take Profit Levels — wide targets, small sells, let trailing stop
+            # do the heavy lifting. TP1 locks in some profit, TP2 is for big moves.
+            take_profit_1_pct=Decimal(os.getenv("TAKE_PROFIT_1_PCT", "0.15")),
+            take_profit_1_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_1_SELL_RATIO", "0.25")),
+            take_profit_2_pct=Decimal(os.getenv("TAKE_PROFIT_2_PCT", "0.40")),
+            take_profit_2_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_2_SELL_RATIO", "0.35")),
 
             # Strategy Flags
-            enable_short=os.getenv("ENABLE_SHORT", "true").lower() == "true",
+            enable_short=os.getenv("ENABLE_SHORT", "false").lower() == "true",
 
             # Strategy Selection
-            strategy=os.getenv("STRATEGY", "auto"),
+            strategy=os.getenv("STRATEGY", "trend_following"),
 
-            # Mean-Reversion Parameters
-            mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "25")),
+            # Mean-Reversion Parameters (only used if STRATEGY=mean_reversion)
+            mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "30")),
             mr_bollinger_period=int(os.getenv("MR_BOLLINGER_PERIOD", "20")),
             mr_bollinger_std=float(os.getenv("MR_BOLLINGER_STD", "2.0")),
             mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.08")),
             mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "10")),
 
             # Concentration Guard
-            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "7")),
+            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
 
-            # WebSocket Mode
-            ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "180")),
+            # WebSocket Mode — 300s (5min) between full scans; ticks handle exits
+            ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "300")),
 
             # Asset Configuration
             asset_blacklist=["DOGE", "SHLD", "SHIB"],
             momentum_window_hours=24,
-            top_momentum_count=int(os.getenv("TOP_MOMENTUM_COUNT", "4")),
+            top_momentum_count=int(os.getenv("TOP_MOMENTUM_COUNT", "3")),
 
             # Asset Mapping
             asset_mapping={
