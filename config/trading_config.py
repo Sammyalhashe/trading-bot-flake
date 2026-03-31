@@ -95,8 +95,9 @@ class TradingConfig:
             trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.07")),
             min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
 
-            # Fee Configuration — Coinbase Advanced taker fee ~0.6% round-trip
-            round_trip_fee_pct=Decimal(os.getenv("ROUND_TRIP_FEE_PCT", "0.006")),
+            # Fee Configuration — Coinbase Advanced 3 tier (Coinbase One):
+            # Maker 0.075% / Taker 0.150% per side → 0.30% round-trip (taker)
+            round_trip_fee_pct=Decimal(os.getenv("ROUND_TRIP_FEE_PCT", "0.003")),
 
             # Take Profit Levels — wide targets, small sells, let trailing stop
             # do the heavy lifting. TP1 locks in some profit, TP2 is for big moves.

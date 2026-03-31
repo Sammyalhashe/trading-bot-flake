@@ -16,7 +16,7 @@ from decimal import Decimal
 from config import TradingConfig, ExecutorConfig
 
 # Import core business logic
-from core import StateManager, TechnicalAnalysis, RegimeDetector
+from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager
 
 # Graceful shutdown
 shutdown_requested = False
@@ -46,6 +46,7 @@ regime_detector = RegimeDetector(
     ma_long_window=config.ma_long_window,
     enable_btc_dominance=config.enable_btc_dominance
 )
+risk_manager = RiskManager(config, initial_capital=10000, state_manager=state_manager)
 
 # --- Logging Configuration ---
 os.makedirs(os.path.dirname(exec_config.log_file), exist_ok=True)
@@ -104,18 +105,12 @@ ETH_RPC_URL = exec_config.eth_rpc_url
 ETH_PRIVATE_KEY = exec_config.eth_private_key
 SHORT_WINDOW = config.ma_short_window
 LONG_WINDOW = config.ma_long_window
-PORTFOLIO_RISK_PERCENTAGE = float(config.portfolio_risk_pct)
-RISK_PER_TRADE_PCT = float(config.risk_per_trade_pct)
-MAX_DRAWDOWN_PCT = float(config.max_drawdown_pct)
-DRAWDOWN_COOLDOWN_HOURS = config.drawdown_cooldown_hours
-MIN_ORDER_USD = float(config.min_order_usd)
 ASSET_BLACKLIST = config.asset_blacklist
 MOMENTUM_WINDOW_HOURS = config.momentum_window_hours
 TOP_MOMENTUM_COUNT = config.top_momentum_count
 TRAILING_STOP_PCT = float(config.trailing_stop_pct)
 MIN_24H_VOLUME_USD = float(config.min_24h_volume_usd)
 RSI_OVERBOUGHT = float(config.rsi_overbought)
-ROUND_TRIP_FEE_PCT = float(config.round_trip_fee_pct)
 TREND_ASSET = config.trend_asset
 ALLOW_BTC_IN_BEAR = config.allow_btc_in_bear
 ENABLE_DUAL_REGIME = config.enable_dual_regime
@@ -348,48 +343,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
 
     # Update peak value and check drawdown (per-executor)
-    peak = load_peak_value(ex_id)
-    if peak == 0.0:
-        # First run — initialize peak to current value
-        save_peak_value(ex_value, ex_id)
-        peak = ex_value
-    elif ex_value > peak:
-        save_peak_value(ex_value, ex_id)
-        peak = ex_value
-    # Drawdown = how far the portfolio has fallen from its all-time high (per-executor).
-    # drawdown% = (peak - current) / peak * 100
-    # e.g. peak=$10k, current=$9k → drawdown = 10%
-    drawdown_pct = ((peak - ex_value) / peak * 100) if peak > 0 else 0
-
-    # Drawdown guard: skip buys if drawdown exceeds limit
-    if drawdown_pct >= MAX_DRAWDOWN_PCT:
-        # Check if cooldown period has elapsed — reset peak to re-enable trading
-        dd_key = f"drawdown_since:{ex_id}"
-        dd_since = state.get(dd_key)
-        if dd_since is None:
-            # First time detecting drawdown — record timestamp
-            state[dd_key] = time.time()
-            save_state(state)
-            logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Pausing new buys.")
-        else:
-            hours_paused = (time.time() - dd_since) / 3600
-            if hours_paused >= DRAWDOWN_COOLDOWN_HOURS:
-                # Cooldown elapsed — reset peak to current value
-                logging.warning(f"[{ex_id}] Drawdown pause active for {hours_paused:.0f}h (limit {DRAWDOWN_COOLDOWN_HOURS}h). Resetting peak to ${ex_value:,.2f} to re-enable trading.")
-                save_peak_value(ex_value, ex_id)
-                peak = ex_value
-                drawdown_pct = 0
-                # Clear the drawdown timestamp
-                state.pop(dd_key, None)
-                save_state(state)
-            else:
-                logging.warning(f"[{ex_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {MAX_DRAWDOWN_PCT}%. Paused for {hours_paused:.1f}h (resets after {DRAWDOWN_COOLDOWN_HOURS}h).")
-    else:
-        # Not in drawdown — clear any previous drawdown timestamp
-        dd_key = f"drawdown_since:{ex_id}"
-        if dd_key in state:
-            state.pop(dd_key)
-            save_state(state)
+    trading_allowed, dd_reason = risk_manager.check_circuit_breakers(ex_value, ex_id)
+    drawdown_pct = risk_manager.get_current_drawdown(ex_value, ex_id)
 
     if reset_to_usdc:
         for asset, amount in held_avail.items():
@@ -403,7 +358,6 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         logging.info(f"[{ex_id}] {full_regime} regime — {strategy.name} skipping new entries")
 
     # Scan for buys
-    trade_limit = ex_value * PORTFOLIO_RISK_PERCENTAGE
     asset_candidates = []
     # Get assets supported by this executor
     supported_assets = executor.get_supported_assets()
@@ -432,23 +386,23 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         try:
             price_data = data_provider.get_product_details(product_id)
             price = float(price_data['price'])
-            # Equal-weight across remaining position slots so capital isn't left idle.
-            # e.g. 3 max positions, 1 held → 2 slots → each gets 50% of available USDC.
-            slots_remaining = max(1, max_positions - current_positions)
-            buy_size = min(available_usdc / slots_remaining, trade_limit / slots_remaining)
-            # Dynamic per-asset position cap: portfolio_value / max_positions.
-            # Scales with account size instead of a fixed dollar amount.
-            dynamic_max_position = ex_value / max(1, max_positions)
             current_asset_value = held_total.get(asset, 0) * price
-            if current_asset_value + buy_size > dynamic_max_position:
-                buy_size = max(0, dynamic_max_position - current_asset_value)
-                if buy_size < MIN_ORDER_USD:
-                    logging.info(f"[{ex_id}] Skipping {asset}: position at ${current_asset_value:,.0f} already at/exceeds dynamic max (${dynamic_max_position:,.0f})")
-                    continue
-                logging.info(f"[{ex_id}] Capped {asset} buy to ${buy_size:,.2f} to stay within dynamic max ${dynamic_max_position:,.0f}")
-            if drawdown_pct >= MAX_DRAWDOWN_PCT and market_regime == "BULL":
-                continue  # Skip long buys during drawdown
-            if buy_size > MIN_ORDER_USD:
+            buy_size, size_msg = risk_manager.calculate_position_with_existing(
+                portfolio_value=ex_value,
+                price=price,
+                existing_positions=current_positions,
+                max_positions=max_positions,
+                current_asset_value=current_asset_value,
+                available_cash=available_usdc,
+                executor_value=ex_value
+            )
+            if buy_size < float(config.min_order_usd):
+                if size_msg != "Normal position sizing":
+                    logging.info(f"[{ex_id}] Skipping {asset}: {size_msg}")
+                continue
+            if not trading_allowed:
+                continue  # Skip buys when circuit breakers are active
+            if buy_size >= float(config.min_order_usd):
                 result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size)
                 if result:
                     # Confirm fill before updating entry price
@@ -492,7 +446,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             price = float(price_data['price'])
 
             # Skip dust balances too small to trade
-            if amt * price < float(MIN_ORDER_USD):
+            if amt * price < float(config.min_order_usd):
                 continue
 
             entry_key = f"{ex_id}:{product_id}"
@@ -574,11 +528,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
                     # Track PnL (fee-aware)
                     # PnL = (exit - entry) * qty - fees
-                    # Fee estimate: entry_price * qty * ROUND_TRIP_FEE_PCT
+                    # Fee estimate: entry_price * qty * round_trip_fee_pct
                     # This accounts for both the buy and sell side fees (~0.3% each
                     # on Uniswap V3 0.3% pools, totaling ~0.6% round-trip).
                     if entry:
-                        fee_cost = entry * sell_amount * ROUND_TRIP_FEE_PCT
+                        fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
                         pnl = (exit_price - entry) * sell_amount - fee_cost
                         is_win = pnl > 0
                         record_trade(is_win, pnl)
@@ -642,8 +596,8 @@ def _run_bot(reset_to_usdc=False):
             raise
 
     logging.info(f"--- 🤖 Crypto Bot Run ({TRADING_MODE.upper()}) ---")
-    logging.info(f"[Risk] max_drawdown={MAX_DRAWDOWN_PCT}% | min_order=${MIN_ORDER_USD:.0f}")
-    logging.info(f"[Risk] portfolio_risk={PORTFOLIO_RISK_PERCENTAGE*100:.0f}% | risk_per_trade={RISK_PER_TRADE_PCT*100:.0f}%")
+    logging.info(f"[Risk] max_drawdown={config.max_drawdown_pct}% | min_order=${float(config.min_order_usd):.0f}")
+    logging.info(f"[Risk] portfolio_risk={float(config.portfolio_risk_pct)*100:.0f}% | risk_per_trade={float(config.risk_per_trade_pct)*100:.0f}%")
     logging.info(f"Trailing Stop: {TRAILING_STOP_PCT*100:.1f}% | TP1: {TAKE_PROFIT_1_PCT*100:.1f}% ({TAKE_PROFIT_1_SELL_RATIO*100:.0f}% sell) | TP2: {TAKE_PROFIT_2_PCT*100:.1f}% ({TAKE_PROFIT_2_SELL_RATIO*100:.0f}% sell)")
     data_provider = cb_executor
 
@@ -780,7 +734,7 @@ def _run_bot(reset_to_usdc=False):
     else:
         logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
     logging.info(f"Portfolio Value: ${aggregate_value:,.2f}")
-    logging.info(f"Risk Params: max_dd={MAX_DRAWDOWN_PCT}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
+    logging.info(f"Risk Params: max_dd={config.max_drawdown_pct}% | trailing_stop={TRAILING_STOP_PCT*100:.0f}%")
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
     logging.info(f"==================")
 
@@ -837,7 +791,7 @@ def run_ws_mode():
 
             asset = product_id.split("-")[0]
             amt = _balances.get(asset, 0)
-            if amt * price < float(MIN_ORDER_USD):
+            if amt * price < float(config.min_order_usd):
                 return  # dust
 
             df = _candle_cache.get(product_id)
@@ -894,7 +848,7 @@ def run_ws_mode():
                         return
                 logging.info(f"[WS] Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
                 if entry:
-                    fee_cost = entry * sell_amount * ROUND_TRIP_FEE_PCT
+                    fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
                     pnl = (exit_price - entry) * sell_amount - fee_cost
                     record_trade(pnl > 0, pnl)
                     logging.info(f"[WS] PnL: ${pnl:+.2f}")

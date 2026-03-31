@@ -61,12 +61,16 @@ def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
 
     logger.info(f"Downloading {period_key} data at {timeframe_key} timeframe...")
 
+    # Use path relative to this script's location
+    script_dir = Path(__file__).parent
+    download_script = script_dir / "download_historical_data.py"
+
     cmd = [
-        "./download_historical_data.py",
+        str(download_script),
         "--symbols", *symbols,
         "--start", period["start"],
         "--granularity", str(timeframe_seconds),
-        "--output-dir", f"../data/backtest/{period_key}_{timeframe_key}"
+        "--output-dir", f"data/backtest/{period_key}_{timeframe_key}"
     ]
 
     if period["end"]:
@@ -82,16 +86,18 @@ def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
 
 def run_backtest(symbols, period_key, timeframe_key, strategy, initial_capital):
     """Run backtest for a specific configuration."""
-    data_dir = f"../data/backtest/{period_key}_{timeframe_key}"
-    output_prefix = f"../data/results/{period_key}_{timeframe_key}_{strategy}"
+    script_dir = Path(__file__).parent
+    backtest_script = script_dir / "backtest.py"
+    data_dir = f"data/backtest/{period_key}_{timeframe_key}"
+    output_prefix = f"data/results/{period_key}_{timeframe_key}_{strategy}"
 
     logger.info(f"Testing {strategy} on {period_key} ({timeframe_key})...")
 
     # Create results directory
-    Path("../data/results").mkdir(parents=True, exist_ok=True)
+    Path("data/results").mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        "./backtest.py",
+        str(backtest_script),
         "--data-dir", data_dir,
         "--symbols", *symbols,
         "--strategies", strategy,
@@ -208,8 +214,8 @@ def generate_report(all_results):
     df = pd.DataFrame(all_results)
 
     # Save raw results
-    df.to_csv("../data/results/comprehensive_results.csv", index=False)
-    logger.info("Saved raw results to ../data/results/comprehensive_results.csv")
+    df.to_csv("data/results/comprehensive_results.csv", index=False)
+    logger.info("Saved raw results to data/results/comprehensive_results.csv")
 
     # Generate summary reports
     print("\n" + "="*100)
@@ -285,7 +291,7 @@ def generate_report(all_results):
     print(timeframe_avg.to_string())
 
     print("\n" + "="*100)
-    print(f"Complete results saved to: ../data/results/comprehensive_results.csv")
+    print(f"Complete results saved to: data/results/comprehensive_results.csv")
     print("="*100 + "\n")
 
 

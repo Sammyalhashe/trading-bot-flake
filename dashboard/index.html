@@ -253,7 +253,7 @@
                 .map(m => m.strategy))];
             const select = document.getElementById('strategy-select');
             select.innerHTML = '<option value="">Select strategy</option>' +
-                strategies.map(s => `<option value="${s}">${s.replace('_', ' ')}</option>`).join('');
+                strategies.map(s => `<option value="${s}">${s.replaceAll('_', ' ')}</option>`).join('');
         }
 
         function loadBacktest(period, timeframe, strategy) {
@@ -294,27 +294,43 @@
         }
 
         function displayChart(equityData, result) {
-            // Initialize chart if needed
-            if (!chart) {
-                const chartDiv = document.getElementById('equity-chart');
-                chart = LightweightCharts.createChart(chartDiv, {
-                    layout: {
-                        background: { color: '#131722' },
-                        textColor: '#d1d4dc',
-                    },
-                    grid: {
-                        vertLines: { color: '#1e222d' },
-                        horzLines: { color: '#1e222d' },
-                    },
-                    timeScale: {
-                        borderColor: '#2a2e39',
-                        timeVisible: true,
-                    },
-                    rightPriceScale: {
-                        borderColor: '#2a2e39',
-                    },
-                });
+            // Make container visible BEFORE creating chart so it has dimensions
+            document.getElementById('chart-container').style.display = 'block';
+
+            // Destroy old chart if it exists (clean slate for new data)
+            if (chart) {
+                chart.remove();
+                chart = null;
+                equitySeries = null;
+            }
+
+            const chartDiv = document.getElementById('equity-chart');
+            chart = LightweightCharts.createChart(chartDiv, {
+                layout: {
+                    background: { color: '#131722' },
+                    textColor: '#d1d4dc',
+                },
+                grid: {
+                    vertLines: { color: '#1e222d' },
+                    horzLines: { color: '#1e222d' },
+                },
+                timeScale: {
+                    borderColor: '#2a2e39',
+                    timeVisible: true,
+                },
+                rightPriceScale: {
+                    borderColor: '#2a2e39',
+                },
+            });
+
+            // addLineSeries is supported in v3; v4+ uses addSeries with LineSeries type
+            if (typeof chart.addLineSeries === 'function') {
                 equitySeries = chart.addLineSeries({
+                    color: '#2962ff',
+                    lineWidth: 2,
+                });
+            } else {
+                equitySeries = chart.addSeries(LightweightCharts.LineSeries, {
                     color: '#2962ff',
                     lineWidth: 2,
                 });
@@ -328,8 +344,6 @@
 
             equitySeries.setData(chartData);
             chart.timeScale().fitContent();
-
-            document.getElementById('chart-container').style.display = 'block';
         }
 
         function showError(msg) {
