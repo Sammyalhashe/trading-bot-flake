@@ -147,7 +147,7 @@ class TradingConfig:
         errors = []
 
         # Strategy validation
-        valid_strategies = ["trend_following", "mean_reversion", "auto"]
+        valid_strategies = ["trend_following", "mean_reversion", "supertrend", "auto"]
         if self.strategy not in valid_strategies:
             errors.append(f"Invalid strategy '{self.strategy}', must be one of {valid_strategies}")
 
