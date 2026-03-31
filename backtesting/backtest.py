@@ -4,9 +4,14 @@ Backtest trading strategies against historical data.
 
 Tests mean_reversion, trend_following, and auto (dynamic) strategies.
 """
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pandas as pd
 import numpy as np
-from pathlib import Path
 from datetime import datetime
 import argparse
 import logging
@@ -118,6 +123,7 @@ class BacktestEngine:
         strategies = {
             "trend_following": create_strategy("trend_following", self.ta, self.config),
             "mean_reversion": create_strategy("mean_reversion", self.ta, self.config),
+            "supertrend": create_strategy("supertrend", self.ta, self.config),
         }
 
         # Get the primary dataset for time iteration (use first asset)
@@ -413,8 +419,8 @@ def main():
     parser.add_argument('--symbols', nargs='+', default=['BTC-USD', 'ETH-USD'],
                        help='Symbols to backtest (default: BTC-USD ETH-USD)')
     parser.add_argument('--strategies', nargs='+',
-                       default=['mean_reversion', 'trend_following', 'auto'],
-                       help='Strategies to test: mean_reversion, trend_following, auto')
+                       default=['mean_reversion', 'trend_following', 'supertrend', 'auto'],
+                       help='Strategies to test: mean_reversion, trend_following, supertrend, auto')
     parser.add_argument('--initial-capital', type=float, default=10000,
                        help='Initial capital in USD (default: 10000)')
     parser.add_argument('--output', type=str, default='backtest_results.csv',
