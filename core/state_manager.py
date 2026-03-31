@@ -129,13 +129,20 @@ class StateManager:
             "winning_trades": 0,
             "losing_trades": 0,
             "total_pnl": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
             "run_count": 0
         })
+        # Ensure fields exist for older state files
+        perf.setdefault("gross_profit", 0.0)
+        perf.setdefault("gross_loss", 0.0)
         perf["total_trades"] += 1
         if is_win:
             perf["winning_trades"] += 1
+            perf["gross_profit"] += pnl
         else:
             perf["losing_trades"] += 1
+            perf["gross_loss"] += abs(pnl)
         perf["total_pnl"] += pnl
         perf["last_run_time"] = datetime.datetime.now().isoformat()
         self.save_state(state)
@@ -155,15 +162,31 @@ class StateManager:
         self.save_state(state)
 
     def get_performance(self) -> dict:
-        """Get performance metrics"""
+        """Get performance metrics including profit factor"""
         state = self.load_state()
-        return state.get("performance", {
+        perf = state.get("performance", {
             "total_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
             "total_pnl": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
             "run_count": 0
         })
+        # Ensure fields exist for older state files
+        perf.setdefault("gross_profit", 0.0)
+        perf.setdefault("gross_loss", 0.0)
+        # Compute profit factor: gross_profit / gross_loss (>1.0 = profitable)
+        gross_loss = perf.get("gross_loss", 0.0)
+        perf["profit_factor"] = (
+            perf.get("gross_profit", 0.0) / gross_loss if gross_loss > 0 else float('inf')
+        )
+        # Average win/loss for risk-reward analysis
+        wins = perf.get("winning_trades", 0)
+        losses = perf.get("losing_trades", 0)
+        perf["avg_win"] = perf.get("gross_profit", 0.0) / wins if wins > 0 else 0.0
+        perf["avg_loss"] = perf.get("gross_loss", 0.0) / losses if losses > 0 else 0.0
+        return perf
 
     def log_performance_summary(self) -> None:
         """Log performance summary to logger"""
@@ -171,7 +194,11 @@ class StateManager:
         total = perf.get("total_trades", 0)
         wins = perf.get("winning_trades", 0)
         win_rate = (wins / total * 100) if total > 0 else 0
+        pf = perf.get("profit_factor", 0)
+        pf_str = f"{pf:.2f}" if pf != float('inf') else "inf"
         logger.info(
             f"[Performance] Trades: {total} | Wins: {wins} ({win_rate:.0f}%) | "
-            f"Total PnL: ${perf.get('total_pnl', 0):+.2f}"
+            f"PnL: ${perf.get('total_pnl', 0):+.2f} | "
+            f"Profit Factor: {pf_str} | "
+            f"Avg Win: ${perf.get('avg_win', 0):+.2f} / Avg Loss: ${perf.get('avg_loss', 0):.2f}"
         )

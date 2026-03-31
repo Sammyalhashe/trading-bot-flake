@@ -934,11 +934,16 @@ if __name__ == "__main__":
         wins = perf.get("winning_trades", 0)
         losses = perf.get("losing_trades", 0)
         win_rate = (wins / total * 100) if total > 0 else 0
+        pf = perf.get("profit_factor", 0)
+        pf_str = f"{pf:.2f}" if pf != float('inf') else "inf"
         print(f"=== Trading Bot Performance ===")
         print(f"Total Trades: {total}")
         print(f"Winning: {wins} | Losing: {losses}")
         print(f"Win Rate: {win_rate:.1f}%")
+        print(f"Profit Factor: {pf_str} (gross_profit / gross_loss, >1.0 = profitable)")
+        print(f"Avg Win: ${perf.get('avg_win', 0):+.2f} | Avg Loss: ${perf.get('avg_loss', 0):.2f}")
         print(f"Total PnL: ${perf.get('total_pnl', 0):+.2f}")
+        print(f"Gross Profit: ${perf.get('gross_profit', 0):+.2f} | Gross Loss: ${perf.get('gross_loss', 0):.2f}")
         print(f"Runs: {perf.get('run_count', 0)}")
         print(f"Last Run: {perf.get('last_run_time', 'N/A')}")
     else:
