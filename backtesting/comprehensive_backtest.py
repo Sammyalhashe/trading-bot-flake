@@ -52,7 +52,7 @@ TIMEFRAMES = {
     "1d": 86400,
 }
 
-STRATEGIES = ["mean_reversion", "trend_following", "auto"]
+STRATEGIES = ["mean_reversion", "trend_following", "supertrend", "auto"]
 
 
 def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
