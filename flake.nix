@@ -37,6 +37,7 @@
             cp -r $src/core $out/bin/core
             cp -r $src/strategies $out/bin/strategies
             cp -r $src/executors $out/bin/executors
+            cp -r $src/backtesting $out/bin/backtesting
 
             # Rename main entry point
             mv $out/bin/trading_bot.py $out/bin/trading-bot
@@ -65,6 +66,25 @@
             wrapProgram $out/bin/debug-tx \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
               --set PYTHONPATH $out/bin
+
+            # Backtesting tools
+            chmod +x $out/bin/backtesting/backtest.py
+            ln -s $out/bin/backtesting/backtest.py $out/bin/backtest
+            wrapProgram $out/bin/backtesting/backtest.py \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
+
+            chmod +x $out/bin/backtesting/comprehensive_backtest.py
+            ln -s $out/bin/backtesting/comprehensive_backtest.py $out/bin/comprehensive-backtest
+            wrapProgram $out/bin/backtesting/comprehensive_backtest.py \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
+
+            chmod +x $out/bin/backtesting/download_historical_data.py
+            ln -s $out/bin/backtesting/download_historical_data.py $out/bin/download-data
+            wrapProgram $out/bin/backtesting/download_historical_data.py \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
           '';
         };
 
@@ -84,6 +104,18 @@
           debug-tx = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/debug-tx";
+          };
+          backtest = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/backtest";
+          };
+          comprehensive-backtest = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/comprehensive-backtest";
+          };
+          download-data = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/download-data";
           };
         };
 
