@@ -10,9 +10,11 @@ A walkthrough of the algorithms in this codebase, what they do, and why they wor
 2. [Technical Indicators](#technical-indicators)
 3. [Trend-Following Strategy](#trend-following-strategy)
 4. [Mean-Reversion Strategy](#mean-reversion-strategy)
-5. [Risk Management](#risk-management)
-6. [Market Regime Detection](#market-regime-detection)
-7. [Further Reading](#further-reading)
+5. [Supertrend Strategy](#supertrend-strategy)
+6. [Auto Strategy](#auto-strategy)
+7. [Risk Management](#risk-management)
+8. [Market Regime Detection](#market-regime-detection)
+9. [Further Reading](#further-reading)
 
 ---
 
@@ -28,19 +30,18 @@ A trading strategy answers three questions:
 
 Everything else — fetching data, placing orders, tracking state — is infrastructure. The `Strategy` protocol in `core/strategy.py` captures this separation: strategies only decide *what* to do, while `trading_bot.py` handles *how* to do it.
 
-### Two philosophies
+### Strategy Overview
 
-The two strategies in this bot represent opposing beliefs about markets:
+This bot includes four strategies, each with different strengths:
 
-| | Trend-Following | Mean-Reversion |
-|---|---|---|
-| **Belief** | "Prices that are rising will keep rising" | "Prices that dropped too far will bounce back" |
-| **Buys when** | Price is trending up | Price is abnormally low |
-| **Sells when** | Trend reverses or profit target hit | Price returns to average |
-| **Works best in** | Trending markets (strong bull/bear) | Sideways/choppy markets |
-| **Fails in** | Sideways markets (whipsaw) | Strong trends (catches falling knives) |
+| Strategy | Belief | Buys When | Sells When | Best In | Fails In |
+|---|---|---|---|---|---|
+| **Trend-Following** | "Rising prices keep rising" | MA crossover + uptrend | Trend reverses or profit target | Strong trends | Sideways/choppy |
+| **Mean-Reversion** | "Extreme moves bounce back" | RSI oversold + below BB | Returns to average | Sideways/range-bound | Strong trends |
+| **Supertrend** | "Volatility defines trend" | Supertrend flips bullish | Supertrend flips bearish | Volatile trending markets | Low volatility |
+| **Auto** | "Adapt to conditions" | Switches between strategies | Based on active strategy | All conditions | (Adaptive) |
 
-This is why the bot lets you switch between them — no single strategy works in all conditions.
+The **Auto strategy** (default) automatically switches between Trend-Following (in bull markets) and Mean-Reversion (in sideways/bear markets) based on market regime detection. This provides the best risk-adjusted returns across different market conditions.
 
 ---
 
@@ -60,8 +61,8 @@ s_ma = df['close'].ewm(span=self.ma_short_window, adjust=False).mean().iloc[-1]
 l_ma = df['close'].ewm(span=self.ma_long_window, adjust=False).mean().iloc[-1]
 ```
 
-- `ma_short_window=20` — reacts quickly (follows recent price action)
-- `ma_long_window=50` — reacts slowly (represents the longer-term trend)
+- `ma_short_window=50` — medium-term trend (follows recent price action)
+- `ma_long_window=200` — long-term trend ("golden cross" indicator)
 
 **How to read it:**
 - Short MA > Long MA → price is trending up (recent prices higher than historical)
@@ -180,8 +181,8 @@ The strategy requires ALL of these to be true:
 
 1. **MA crossover:** Short EMA > Long EMA * 1.002 (uptrend)
 2. **Confirmation:** Crossover held for 2 bars
-3. **RSI filter:** RSI < 70 (not overbought)
-4. **Volume filter:** 24h USD volume > $100,000 (liquidity check)
+3. **RSI filter:** RSI < 75 (not overbought)
+4. **Volume filter:** 24h USD volume > $500,000 (liquidity check)
 5. **Regime filter:** Market is BULL (or BTC in BEAR with exemption)
 
 ```python
@@ -332,6 +333,189 @@ Mean-reversion shorts (selling overbought assets expecting a pullback) are much 
 
 ---
 
+## Supertrend Strategy
+
+**File:** `strategies/supertrend.py`
+
+### The Core Idea
+
+The Supertrend indicator is a volatility-based trend-following system that plots a dynamic support/resistance line above or below price. Unlike MA-based trend-following, it adapts to market volatility using ATR (Average True Range), making it more responsive in volatile conditions and less prone to whipsaw in calm markets.
+
+### How Supertrend Works
+
+The indicator calculates two bands using Average True Range (ATR):
+
+```python
+# Basic formula
+basic_upper_band = (high + low) / 2 + (multiplier × ATR)
+basic_lower_band = (high + low) / 2 - (multiplier × ATR)
+```
+
+**Default parameters:**
+- `atr_period = 10` — lookback period for ATR calculation
+- `atr_multiplier = 3.0` — distance of bands from price (higher = wider bands, fewer signals)
+
+The indicator then determines trend direction:
+- **Bullish:** Price closes above upper band → Supertrend line below price (green)
+- **Bearish:** Price closes below lower band → Supertrend line above price (red)
+
+Once a trend is established, the Supertrend line "trails" price:
+- In uptrend: Line follows lower band, can only move up or stay flat
+- In downtrend: Line follows upper band, can only move down or stay flat
+
+This creates a ratcheting effect that protects profits while giving the trend room to breathe.
+
+### Entry Logic
+
+Requires ALL of these:
+
+1. **Supertrend flip:** Indicator changes from bearish to bullish (crosses below price)
+2. **Confirmation:** Supertrend has been bullish for at least 2 bars (reduces noise)
+3. **Volume filter:** 24h USD volume > $500,000 (liquidity check)
+4. **Regime filter:** Market is BULL or NEUTRAL (skips BEAR/STRONG_BEAR)
+
+```python
+# strategies/supertrend.py — scan_entry()
+supertrend_value, is_uptrend = self.calculate_supertrend(df, atr_period, atr_multiplier)
+if not is_uptrend:
+    return None  # Not in uptrend
+
+# Confirmation check (at least 2 consecutive bars in uptrend)
+if len(df) >= 2:
+    prev_value, prev_trend = self.calculate_supertrend(df.iloc[:-1], atr_period, atr_multiplier)
+    if not prev_trend:
+        return None  # Not confirmed
+```
+
+**Candidate ranking:** Assets are ranked by **distance from Supertrend line**. The furthest above the line (strongest uptrend) gets priority.
+
+### Exit Logic
+
+Much simpler than MA-based trend-following — the Supertrend indicator itself provides the exit signal:
+
+#### 1. Supertrend Reversal (Primary Exit)
+```python
+if not is_uptrend:  # Supertrend flipped bearish
+    return True, 1.0, "Supertrend reversal"
+```
+
+When the Supertrend line crosses above price (turns red), the trend has reversed. Exit the full position. This is the primary exit and typically fires before major losses.
+
+#### 2. Trailing Stop (Safety Net)
+```python
+atr_stop_pct = max(0.05, min(0.15, 2.0 * atr / price))
+stop_price = hwm * (1 - atr_stop_pct)
+if price < stop_price:
+    return True, 1.0, "Supertrend stop loss"
+```
+
+A backup ATR-based stop in case price drops sharply before the Supertrend flips. Protects against gap-downs or flash crashes.
+
+### Supertrend vs MA Trend-Following
+
+| Aspect | Supertrend | MA Crossover |
+|---|---|---|
+| **Signal source** | ATR-based bands | Moving average crossover |
+| **Adapts to volatility** | Yes (ATR adjusts) | No (fixed %) |
+| **Lag** | Less (ATR responds faster) | More (MAs smooth noise) |
+| **False signals** | More in choppy markets | Fewer (but later entries) |
+| **Best for** | Volatile trending markets | Smooth, extended trends |
+| **Stop method** | Built-in (Supertrend line) | Separate trailing stop |
+
+**When to use Supertrend:**
+- High volatility environments (crypto bull runs, breaking news)
+- Assets with clear directional moves
+- When you want faster entries than MA crossovers
+
+**When to use MA Trend-Following:**
+- Lower volatility, steadier trends
+- When you want fewer whipsaws
+- Long-term trend following (months, not days)
+
+---
+
+## Auto Strategy
+
+**File:** `trading_bot.py` (strategy selector)
+
+### The Core Idea
+
+The Auto strategy doesn't have its own entry/exit logic. Instead, it **dynamically switches between strategies** based on market regime detection. This provides consistent performance across different market conditions by using the right tool for each environment.
+
+### How It Works
+
+```python
+# trading_bot.py — select_strategy_for_regime()
+if full_regime in ("STRONG_BULL", "BULL"):
+    return _strategies["trend_following"]
+elif full_regime == "NEUTRAL":
+    return _strategies["mean_reversion"]
+else:  # BEAR, STRONG_BEAR
+    return _strategies["trend_following"]
+```
+
+**Strategy Selection:**
+- **STRONG_BULL / BULL** → Trend-Following (ride the momentum)
+- **NEUTRAL** → Mean-Reversion (profit from oscillations)
+- **BEAR / STRONG_BEAR** → Trend-Following (but BTC exemption allows defensive positioning)
+
+### Market Regime Detection
+
+The bot determines regime using two signals (when `ENABLE_DUAL_REGIME=true`):
+
+1. **BTC Macro Trend:** Is Bitcoin trending up (BULL), down (BEAR), or sideways (FLAT)?
+2. **ETH/BTC Ratio:** Is money flowing into altcoins (ETH_LEADING) or back to Bitcoin (BTC_LEADING)?
+
+These combine into five states:
+
+| Regime | BTC Trend | Rotation | Strategy Used | Why |
+|---|---|---|---|---|
+| STRONG_BULL | BULL | ETH_LEADING | Trend-Following | Strong uptrend + alts outperforming |
+| BULL | BULL | BTC_LEADING | Trend-Following | Uptrend but capital defensive |
+| NEUTRAL | FLAT | Any | Mean-Reversion | Sideways = oscillation opportunities |
+| BEAR | BEAR | BTC_LEADING | Trend-Following | Downtrend, defensive positioning |
+| STRONG_BEAR | BEAR | ETH_LEADING | Trend-Following | Downtrend + alts dumping harder |
+
+### Backtest Performance
+
+Based on comprehensive backtesting (36 tests across 5 market periods, 2023-2026):
+
+| Strategy | Avg Return | Sharpe Ratio | Win Rate | Total Trades |
+|---|---|---|---|---|
+| **Auto** | **+10.36%** | **1.47** | 50.3% | 3,626 |
+| Trend-Following | +11.69% | 1.42 | 42.6% | 1,330 |
+| Mean-Reversion | +2.04% | 1.31 | 64.5% | 4,459 |
+
+**Why Auto wins:**
+- **Consistent across conditions:** Positive in all tested periods (2023-2026)
+- **Best risk-adjusted:** Highest Sharpe ratio (1.47)
+- **Adaptive:** Won in recent YTD 2025 period (+4.23%) while others lost money
+- **Balanced win rate:** 50% wins vs trend-following's 43%
+
+### When to Use Auto vs Fixed Strategy
+
+**Use Auto (default) when:**
+- You want consistent performance across all market conditions
+- You're running the bot long-term without daily oversight
+- You prioritize risk-adjusted returns over absolute returns
+
+**Use Trend-Following when:**
+- You're confident we're in a sustained bull market
+- You want maximum upside in trending conditions
+- You can monitor and switch strategies manually
+
+**Use Mean-Reversion when:**
+- Market is clearly range-bound (sideways for weeks)
+- Volatility is low with frequent bounces
+- You want high win rate with smaller gains
+
+**Use Supertrend when:**
+- Extreme volatility (breaking news, bull run peaks)
+- You want faster entries than MA-based strategies
+- You're comfortable with more frequent trades
+
+---
+
 ## Risk Management
 
 Risk management is what keeps a bot alive. The entry/exit signals can be wrong half the time and still be profitable if losses are kept small.
@@ -380,11 +564,11 @@ If the portfolio drops 10% from its all-time high, stop buying. This prevents co
 
 ```python
 usd_volume_24h = volume_24h * close_price
-if usd_volume_24h < MIN_24H_VOLUME_USD:  # $100,000
+if usd_volume_24h < MIN_24H_VOLUME_USD:  # $500,000
     continue
 ```
 
-Low-volume assets have wide bid-ask spreads and are easy to manipulate. The volume filter avoids them.
+Low-volume assets have wide bid-ask spreads and are easy to manipulate. The volume filter avoids illiquid assets.
 
 ### Fee Awareness
 
@@ -438,3 +622,6 @@ Each strategy responds differently:
 - **Kelly Criterion** — optimal position sizing based on your win rate and average win/loss
 - **Correlation** — if all your positions move together, you're not really diversified
 - **Slippage** — the difference between the price you wanted and the price you got (this bot uses limit orders to minimize it)
+
+### Long-term roadmap
+For the bigger picture — Python/C++ architecture split, knowledge gaps, and how production trading systems work — see the [Next Steps](https://github.com/Sammyalhashe/crypto_trader/blob/main/doc/NEXT_STEPS.md) doc in the companion C++ repo.
