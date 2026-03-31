@@ -1,6 +1,15 @@
 __pycache__/
 .aider*
 
+# Python virtual environment
+venv/
+.venv/
+
+# Data and results (managed by backtesting tools)
+historical_data/
+equity_curve_*.csv
+trades_*.csv
+
 # Runtime state — managed by the bot, not by git
 trading_state.json
 trading_state.json.lock
