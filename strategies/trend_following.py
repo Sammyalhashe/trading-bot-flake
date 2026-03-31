@@ -14,7 +14,6 @@ class TrendFollowingStrategy:
         self.ta = ta
         self.config = config
         self.name = "trend_following"
-        self.enables_short = config.enable_short
 
     def should_skip_regime(self, market_regime: str, full_regime: str) -> bool:
         return full_regime == "NEUTRAL"
@@ -117,26 +116,3 @@ class TrendFollowingStrategy:
                 tp_flags["trend_exit_hit"] = True
 
         return sell_trigger, sell_ratio, reason, tp_flags
-
-    def scan_short_entry(self, asset: str, product_id: str, df,
-                         market_regime: str, full_regime: str) -> dict | None:
-        ma_s, ma_l = self.ta.analyze_trend(df)
-        if not (ma_s and ma_l and ma_s < ma_l * 0.998):
-            return None
-        if not self.ta.is_crossover_confirmed(df, "bear"):
-            return None
-
-        # Volume filter
-        min_volume = float(self.config.min_24h_volume_usd)
-        if df is not None and len(df) >= 24:
-            volume_24h = df['volume'].iloc[-24:].sum()
-            close_price = df['close'].iloc[-1]
-            usd_volume_24h = volume_24h * close_price
-            if usd_volume_24h < min_volume:
-                return None
-
-        momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
-        return {"asset": asset, "product_id": product_id, "score": momentum}
-
-    def rank_short_candidates(self, candidates: list[dict]) -> list[dict]:
-        return sorted(candidates, key=lambda x: x["score"])

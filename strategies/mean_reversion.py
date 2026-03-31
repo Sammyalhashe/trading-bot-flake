@@ -15,7 +15,6 @@ class MeanReversionStrategy:
         self.ta = ta
         self.config = config
         self.name = "mean_reversion"
-        self.enables_short = False
 
     def should_skip_regime(self, market_regime: str, full_regime: str) -> bool:
         # Skip BEAR and STRONG_BEAR — trends too strong for reversion
@@ -84,10 +83,3 @@ class MeanReversionStrategy:
                 return True, 1.0, f"Mean reversion time exit for {asset} ({elapsed_candles:.0f} candles elapsed)", tp_flags
 
         return False, 0.0, "", tp_flags
-
-    def scan_short_entry(self, asset: str, product_id: str, df,
-                         market_regime: str, full_regime: str) -> dict | None:
-        return None
-
-    def rank_short_candidates(self, candidates: list[dict]) -> list[dict]:
-        return []

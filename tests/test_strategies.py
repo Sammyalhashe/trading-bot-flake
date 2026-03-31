@@ -237,10 +237,6 @@ class TestTrendFollowingStrategy:
         assert "Trend-exit" in reason
         assert flags["trend_exit_hit"] is True
 
-    def test_enables_short_matches_config(self):
-        s = self._make_strategy()
-        assert s.enables_short == s.config.enable_short
-
 
 # ===== MeanReversionStrategy =====
 
@@ -342,12 +338,6 @@ class TestMeanReversionStrategy:
         assert ranked[0]["asset"] == "B"  # Lowest RSI first
         assert ranked[1]["asset"] == "C"
         assert ranked[2]["asset"] == "A"
-
-    def test_no_shorts(self):
-        s = self._make_strategy()
-        assert s.enables_short is False
-        assert s.scan_short_entry("BTC", "BTC-USDC", make_bearish_df(), "BEAR", "BEAR") is None
-        assert s.rank_short_candidates([{"a": 1}]) == []
 
 
 # ===== Strategy Factory =====

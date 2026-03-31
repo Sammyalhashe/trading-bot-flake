@@ -14,7 +14,6 @@ class TradingConfig:
 
     # Risk Management
     portfolio_risk_pct: Decimal
-    short_risk_pct: Decimal
     risk_per_trade_pct: Decimal
     max_drawdown_pct: Decimal
     drawdown_cooldown_hours: int
@@ -39,9 +38,6 @@ class TradingConfig:
     take_profit_1_sell_ratio: Decimal
     take_profit_2_pct: Decimal
     take_profit_2_sell_ratio: Decimal
-
-    # Strategy Flags
-    enable_short: bool
 
     # Asset Configuration
     asset_blacklist: list[str]
@@ -83,7 +79,6 @@ class TradingConfig:
 
             # Risk Management
             portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.90")),
-            short_risk_pct=Decimal(os.getenv("SHORT_RISK_PERCENTAGE", "0.05")),
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.95")),
             max_drawdown_pct=Decimal(os.getenv("MAX_DRAWDOWN_PCT", "15")),
             drawdown_cooldown_hours=int(os.getenv("DRAWDOWN_COOLDOWN_HOURS", "48")),
@@ -109,9 +104,6 @@ class TradingConfig:
             take_profit_1_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_1_SELL_RATIO", "0.25")),
             take_profit_2_pct=Decimal(os.getenv("TAKE_PROFIT_2_PCT", "0.40")),
             take_profit_2_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_2_SELL_RATIO", "0.35")),
-
-            # Strategy Flags
-            enable_short=os.getenv("ENABLE_SHORT", "false").lower() == "true",
 
             # Strategy Selection
             strategy=os.getenv("STRATEGY", "trend_following"),
@@ -162,9 +154,6 @@ class TradingConfig:
         # Risk percentage validation
         if not (0 < self.portfolio_risk_pct <= 1):
             errors.append(f"Portfolio risk ({self.portfolio_risk_pct}) must be between 0 and 1")
-
-        if not (0 < self.short_risk_pct <= 1):
-            errors.append(f"Short risk ({self.short_risk_pct}) must be between 0 and 1")
 
         if not (0 < self.risk_per_trade_pct <= 1):
             errors.append(f"Risk per trade ({self.risk_per_trade_pct}) must be between 0 and 1")
