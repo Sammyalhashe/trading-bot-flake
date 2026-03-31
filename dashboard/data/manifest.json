@@ -1,0 +1,794 @@
+[
+  {
+    "id": "2023_Full_Year_15m_auto",
+    "period": "2023_Full_Year",
+    "timeframe": "15m",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12529.287373363924,
+      "total_return_pct": 25.292873733639244,
+      "max_drawdown_pct": -20.551995199876593,
+      "sharpe_ratio": 0.6146308224269823,
+      "num_trades": 892,
+      "win_rate_pct": 49.43946188340807,
+      "avg_win_pct": 0.9973793654025306,
+      "avg_loss_pct": -0.6841411966030637,
+      "profit_factor": 1.2364817401261998
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_15m_auto_equity.json",
+      "trades": "data/2023_Full_Year_15m_auto_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_15m_mean_reversion",
+    "period": "2023_Full_Year_15m",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10054.448551731288,
+      "total_return_pct": 0.544485517312876,
+      "max_drawdown_pct": -6.636549261609648,
+      "sharpe_ratio": 0.06120919440666761,
+      "num_trades": 1171,
+      "win_rate_pct": 58.838599487617415,
+      "avg_win_pct": 0.20804613360672924,
+      "avg_loss_pct": -0.29540028150349473,
+      "profit_factor": 1.0116387704879846
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_15m_mean_reversion_equity.json",
+      "trades": "data/2023_Full_Year_15m_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_15m_trend_following",
+    "period": "2023_Full_Year_15m",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12386.213145512436,
+      "total_return_pct": 23.86213145512437,
+      "max_drawdown_pct": -20.76454620024669,
+      "sharpe_ratio": 0.5815382423597087,
+      "num_trades": 245,
+      "win_rate_pct": 35.10204081632653,
+      "avg_win_pct": 5.456494669669359,
+      "avg_loss_pct": -1.8427490428653646,
+      "profit_factor": 1.3104401688362726
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_15m_trend_following_equity.json",
+      "trades": "data/2023_Full_Year_15m_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1d_auto",
+    "period": "2023_Full_Year",
+    "timeframe": "1d",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11398.699490566343,
+      "total_return_pct": 13.98699490566344,
+      "max_drawdown_pct": -10.096281059798562,
+      "sharpe_ratio": 7.3904346555808145,
+      "num_trades": 15,
+      "win_rate_pct": 53.333333333333336,
+      "avg_win_pct": 22.504543026216197,
+      "avg_loss_pct": -4.465798857137677,
+      "profit_factor": 2.390711766415269
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1d_auto_equity.json",
+      "trades": "data/2023_Full_Year_1d_auto_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1d_mean_reversion",
+    "period": "2023_Full_Year_1d",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 9953.129467248296,
+      "total_return_pct": -0.4687053275170383,
+      "max_drawdown_pct": -1.1212988370733368,
+      "sharpe_ratio": -2.738753453460019,
+      "num_trades": 6,
+      "win_rate_pct": 66.66666666666666,
+      "avg_win_pct": 0.49426101706627756,
+      "avg_loss_pct": -1.6819482556100052,
+      "profit_factor": 0.5819978474780217
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1d_mean_reversion_equity.json",
+      "trades": "data/2023_Full_Year_1d_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1d_trend_following",
+    "period": "2023_Full_Year_1d",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11231.52249141411,
+      "total_return_pct": 12.315224914141098,
+      "max_drawdown_pct": -10.891202511214516,
+      "sharpe_ratio": 6.601686558831195,
+      "num_trades": 12,
+      "win_rate_pct": 41.66666666666667,
+      "avg_win_pct": 33.73993597903301,
+      "avg_loss_pct": -5.166283394666513,
+      "profit_factor": 2.2354370426255974
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1d_trend_following_equity.json",
+      "trades": "data/2023_Full_Year_1d_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1h_auto",
+    "period": "2023_Full_Year",
+    "timeframe": "1h",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12748.544728341772,
+      "total_return_pct": 27.48544728341773,
+      "max_drawdown_pct": -10.141319289113039,
+      "sharpe_ratio": 1.3385137622334258,
+      "num_trades": 268,
+      "win_rate_pct": 49.25373134328358,
+      "avg_win_pct": 2.7950027973420486,
+      "avg_loss_pct": -1.2470117608620084,
+      "profit_factor": 1.4373642469907595
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1h_auto_equity.json",
+      "trades": "data/2023_Full_Year_1h_auto_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1h_mean_reversion",
+    "period": "2023_Full_Year_1h",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10232.942116070308,
+      "total_return_pct": 2.3294211607030713,
+      "max_drawdown_pct": -3.6874021164613136,
+      "sharpe_ratio": 0.5848474543807968,
+      "num_trades": 301,
+      "win_rate_pct": 55.48172757475083,
+      "avg_win_pct": 0.3834390666686013,
+      "avg_loss_pct": -0.42760111993916244,
+      "profit_factor": 1.1219759679652357
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1h_mean_reversion_equity.json",
+      "trades": "data/2023_Full_Year_1h_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "2023_Full_Year_1h_trend_following",
+    "period": "2023_Full_Year_1h",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 13973.864967506004,
+      "total_return_pct": 39.738649675060046,
+      "max_drawdown_pct": -9.850572228376365,
+      "sharpe_ratio": 1.7459851672921207,
+      "num_trades": 143,
+      "win_rate_pct": 44.05594405594406,
+      "avg_win_pct": 6.075242903422959,
+      "avg_loss_pct": -1.7634067289086155,
+      "profit_factor": 1.8251809664741927
+    },
+    "files": {
+      "equity": "data/2023_Full_Year_1h_trend_following_equity.json",
+      "trades": "data/2023_Full_Year_1h_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_15m_auto",
+    "period": "H2_2024",
+    "timeframe": "15m",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12750.0028253516,
+      "total_return_pct": 27.500028253515985,
+      "max_drawdown_pct": -7.314718377657781,
+      "sharpe_ratio": 1.200781349950742,
+      "num_trades": 378,
+      "win_rate_pct": 51.05820105820106,
+      "avg_win_pct": 1.189877803056156,
+      "avg_loss_pct": -0.8160238054366501,
+      "profit_factor": 1.5384982778690448
+    },
+    "files": {
+      "equity": "data/H2_2024_15m_auto_equity.json",
+      "trades": "data/H2_2024_15m_auto_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_15m_mean_reversion",
+    "period": "H2_2024_15m",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11028.02442689873,
+      "total_return_pct": 10.280244268987303,
+      "max_drawdown_pct": -1.6362114496402569,
+      "sharpe_ratio": 1.966895385541132,
+      "num_trades": 520,
+      "win_rate_pct": 63.26923076923077,
+      "avg_win_pct": 0.26773811160844097,
+      "avg_loss_pct": -0.30650058071204833,
+      "profit_factor": 1.4988947117053537
+    },
+    "files": {
+      "equity": "data/H2_2024_15m_mean_reversion_equity.json",
+      "trades": "data/H2_2024_15m_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_15m_trend_following",
+    "period": "H2_2024_15m",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12646.297136471583,
+      "total_return_pct": 26.462971364715827,
+      "max_drawdown_pct": -9.454089965958357,
+      "sharpe_ratio": 1.144614378002517,
+      "num_trades": 119,
+      "win_rate_pct": 41.17647058823529,
+      "avg_win_pct": 4.59642241497094,
+      "avg_loss_pct": -1.7384275059426753,
+      "profit_factor": 1.7611372613823628
+    },
+    "files": {
+      "equity": "data/H2_2024_15m_trend_following_equity.json",
+      "trades": "data/H2_2024_15m_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_1h_auto",
+    "period": "H2_2024",
+    "timeframe": "1h",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11892.808313615857,
+      "total_return_pct": 18.92808313615857,
+      "max_drawdown_pct": -10.075005506323208,
+      "sharpe_ratio": 1.6585903099729173,
+      "num_trades": 141,
+      "win_rate_pct": 51.06382978723404,
+      "avg_win_pct": 2.494655291726252,
+      "avg_loss_pct": -1.7072874414449197,
+      "profit_factor": 1.4912114586348018
+    },
+    "files": {
+      "equity": "data/H2_2024_1h_auto_equity.json",
+      "trades": "data/H2_2024_1h_auto_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_1h_mean_reversion",
+    "period": "H2_2024_1h",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10207.98565960399,
+      "total_return_pct": 2.0798565960399085,
+      "max_drawdown_pct": -3.336318232416857,
+      "sharpe_ratio": 0.9891709883689767,
+      "num_trades": 144,
+      "win_rate_pct": 56.25,
+      "avg_win_pct": 0.4825328055254651,
+      "avg_loss_pct": -0.5201414033605801,
+      "profit_factor": 1.1906556815004241
+    },
+    "files": {
+      "equity": "data/H2_2024_1h_mean_reversion_equity.json",
+      "trades": "data/H2_2024_1h_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "H2_2024_1h_trend_following",
+    "period": "H2_2024_1h",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11071.703143551702,
+      "total_return_pct": 10.717031435517011,
+      "max_drawdown_pct": -11.638500480651693,
+      "sharpe_ratio": 0.9969880008330982,
+      "num_trades": 96,
+      "win_rate_pct": 41.66666666666667,
+      "avg_win_pct": 4.11413933073996,
+      "avg_loss_pct": -2.3777399596326014,
+      "profit_factor": 1.2696766615297947
+    },
+    "files": {
+      "equity": "data/H2_2024_1h_trend_following_equity.json",
+      "trades": "data/H2_2024_1h_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_15m_auto",
+    "period": "Q1_2024_Bull",
+    "timeframe": "15m",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11027.334523285945,
+      "total_return_pct": 10.273345232859455,
+      "max_drawdown_pct": -6.044170917529157,
+      "sharpe_ratio": 1.3675974318833688,
+      "num_trades": 172,
+      "win_rate_pct": 54.06976744186046,
+      "avg_win_pct": 1.212602424503097,
+      "avg_loss_pct": -0.7744469392797086,
+      "profit_factor": 1.5294087937387808
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_15m_auto_equity.json",
+      "trades": "data/Q1_2024_Bull_15m_auto_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_15m_mean_reversion",
+    "period": "Q1_2024_Bull_15m",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10232.25424861322,
+      "total_return_pct": 2.3225424861321953,
+      "max_drawdown_pct": -3.5591591645618204,
+      "sharpe_ratio": 0.7539212204473195,
+      "num_trades": 202,
+      "win_rate_pct": 63.86138613861386,
+      "avg_win_pct": 0.2750603135171048,
+      "avg_loss_pct": -0.38846547434558615,
+      "profit_factor": 1.2452562656925372
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_15m_mean_reversion_equity.json",
+      "trades": "data/Q1_2024_Bull_15m_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_15m_trend_following",
+    "period": "Q1_2024_Bull_15m",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11483.438981578793,
+      "total_return_pct": 14.83438981578793,
+      "max_drawdown_pct": -5.363802410335284,
+      "sharpe_ratio": 1.9768303425721536,
+      "num_trades": 44,
+      "win_rate_pct": 54.54545454545454,
+      "avg_win_pct": 7.593690423167761,
+      "avg_loss_pct": -2.0045380031673967,
+      "profit_factor": 2.3302951639937897
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_15m_trend_following_equity.json",
+      "trades": "data/Q1_2024_Bull_15m_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_1h_auto",
+    "period": "Q1_2024_Bull",
+    "timeframe": "1h",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 11787.53285061591,
+      "total_return_pct": 17.875328506159093,
+      "max_drawdown_pct": -7.45879753602855,
+      "sharpe_ratio": 4.651704419007218,
+      "num_trades": 28,
+      "win_rate_pct": 71.42857142857143,
+      "avg_win_pct": 5.048274673496076,
+      "avg_loss_pct": -2.4409517833144556,
+      "profit_factor": 3.6771566244337386
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_1h_auto_equity.json",
+      "trades": "data/Q1_2024_Bull_1h_auto_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_1h_mean_reversion",
+    "period": "Q1_2024_Bull_1h",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10160.853799589546,
+      "total_return_pct": 1.6085379958954649,
+      "max_drawdown_pct": -1.497092193296834,
+      "sharpe_ratio": 2.9388136969067316,
+      "num_trades": 30,
+      "win_rate_pct": 76.66666666666667,
+      "avg_win_pct": 0.4790235598025701,
+      "avg_loss_pct": -0.8855316298303162,
+      "profit_factor": 1.7768484749337397
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_1h_mean_reversion_equity.json",
+      "trades": "data/Q1_2024_Bull_1h_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "Q1_2024_Bull_1h_trend_following",
+    "period": "Q1_2024_Bull_1h",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 12308.775929689298,
+      "total_return_pct": 23.087759296892973,
+      "max_drawdown_pct": -7.6839546713360685,
+      "sharpe_ratio": 5.7385537163869795,
+      "num_trades": 25,
+      "win_rate_pct": 68.0,
+      "avg_win_pct": 8.75226940227558,
+      "avg_loss_pct": -2.967927368013014,
+      "profit_factor": 4.362161965614367
+    },
+    "files": {
+      "equity": "data/Q1_2024_Bull_1h_trend_following_equity.json",
+      "trades": "data/Q1_2024_Bull_1h_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_15m_auto",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "15m",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10625.27509986097,
+      "total_return_pct": 6.252750998609691,
+      "max_drawdown_pct": -13.028183803820648,
+      "sharpe_ratio": 0.5771583926140861,
+      "num_trades": 232,
+      "win_rate_pct": 49.56896551724138,
+      "avg_win_pct": 1.1619008370373058,
+      "avg_loss_pct": -0.8398412701667447,
+      "profit_factor": 1.180104029107932
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_15m_auto_equity.json",
+      "trades": "data/Q2_2023_Sideways_15m_auto_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_15m_mean_reversion",
+    "period": "Q2_2023_Sideways_15m",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 9908.466726684886,
+      "total_return_pct": -0.9153327331511307,
+      "max_drawdown_pct": -5.2806619842697184,
+      "sharpe_ratio": -0.21461170293954748,
+      "num_trades": 329,
+      "win_rate_pct": 59.57446808510638,
+      "avg_win_pct": 0.24866062345761114,
+      "avg_loss_pct": -0.385425119690392,
+      "profit_factor": 0.9465806005745429
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_15m_mean_reversion_equity.json",
+      "trades": "data/Q2_2023_Sideways_15m_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_15m_trend_following",
+    "period": "Q2_2023_Sideways_15m",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10637.47041011821,
+      "total_return_pct": 6.374704101182105,
+      "max_drawdown_pct": -12.333453514988069,
+      "sharpe_ratio": 0.5830512611293097,
+      "num_trades": 71,
+      "win_rate_pct": 43.66197183098591,
+      "avg_win_pct": 4.108734705587235,
+      "avg_loss_pct": -1.8870973331975691,
+      "profit_factor": 1.2801907138771544
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_15m_trend_following_equity.json",
+      "trades": "data/Q2_2023_Sideways_15m_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_1h_auto",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "1h",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10900.817732935133,
+      "total_return_pct": 9.00817732935133,
+      "max_drawdown_pct": -5.457305818859448,
+      "sharpe_ratio": 1.8172024075892956,
+      "num_trades": 82,
+      "win_rate_pct": 50.0,
+      "avg_win_pct": 2.2183257000575223,
+      "avg_loss_pct": -1.0486335628981363,
+      "profit_factor": 1.6324576208140933
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_1h_auto_equity.json",
+      "trades": "data/Q2_2023_Sideways_1h_auto_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_1h_mean_reversion",
+    "period": "Q2_2023_Sideways_1h",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10286.704893583386,
+      "total_return_pct": 2.8670489358338713,
+      "max_drawdown_pct": -1.1855918637341034,
+      "sharpe_ratio": 2.559100296052101,
+      "num_trades": 74,
+      "win_rate_pct": 60.810810810810814,
+      "avg_win_pct": 0.48358373559249757,
+      "avg_loss_pct": -0.4551758791604544,
+      "profit_factor": 1.6393229715833968
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_1h_mean_reversion_equity.json",
+      "trades": "data/Q2_2023_Sideways_1h_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "Q2_2023_Sideways_1h_trend_following",
+    "period": "Q2_2023_Sideways_1h",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10686.691808139542,
+      "total_return_pct": 6.866918081395412,
+      "max_drawdown_pct": -9.145081512633258,
+      "sharpe_ratio": 1.3387164129307036,
+      "num_trades": 35,
+      "win_rate_pct": 42.857142857142854,
+      "avg_win_pct": 4.46787780033381,
+      "avg_loss_pct": -1.6395507093184236,
+      "profit_factor": 1.6062063736619734
+    },
+    "files": {
+      "equity": "data/Q2_2023_Sideways_1h_trend_following_equity.json",
+      "trades": "data/Q2_2023_Sideways_1h_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_15m_auto",
+    "period": "YTD_2025",
+    "timeframe": "15m",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 8154.487315592878,
+      "total_return_pct": -18.455126844071224,
+      "max_drawdown_pct": -27.312248494364223,
+      "sharpe_ratio": -0.36954842585887926,
+      "num_trades": 1134,
+      "win_rate_pct": 46.38447971781305,
+      "avg_win_pct": 0.8990732337016124,
+      "avg_loss_pct": -0.8697787871300825,
+      "profit_factor": 0.8732813598158395
+    },
+    "files": {
+      "equity": "data/YTD_2025_15m_auto_equity.json",
+      "trades": "data/YTD_2025_15m_auto_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_15m_mean_reversion",
+    "period": "YTD_2025_15m",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 9678.63315838156,
+      "total_return_pct": -3.21366841618439,
+      "max_drawdown_pct": -7.577040255387335,
+      "sharpe_ratio": -0.230242213764647,
+      "num_trades": 1407,
+      "win_rate_pct": 55.863539445628994,
+      "avg_win_pct": 0.23546689811854635,
+      "avg_loss_pct": -0.3129469128180791,
+      "profit_factor": 0.9494514084389883
+    },
+    "files": {
+      "equity": "data/YTD_2025_15m_mean_reversion_equity.json",
+      "trades": "data/YTD_2025_15m_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_15m_trend_following",
+    "period": "YTD_2025_15m",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 8841.873586206088,
+      "total_return_pct": -11.58126413793913,
+      "max_drawdown_pct": -31.151164597794,
+      "sharpe_ratio": -0.196863966554236,
+      "num_trades": 333,
+      "win_rate_pct": 33.33333333333333,
+      "avg_win_pct": 4.2151945403453945,
+      "avg_loss_pct": -1.947245280758695,
+      "profit_factor": 0.882976637688709
+    },
+    "files": {
+      "equity": "data/YTD_2025_15m_trend_following_equity.json",
+      "trades": "data/YTD_2025_15m_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1d_auto",
+    "period": "YTD_2025",
+    "timeframe": "1d",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 9097.40777859484,
+      "total_return_pct": -9.025922214051608,
+      "max_drawdown_pct": -17.916590608236817,
+      "sharpe_ratio": -2.42950365477443,
+      "num_trades": 12,
+      "win_rate_pct": 33.33333333333333,
+      "avg_win_pct": 8.898181714345672,
+      "avg_loss_pct": -5.878145793674772,
+      "profit_factor": 0.424026648666819
+    },
+    "files": {
+      "equity": "data/YTD_2025_1d_auto_equity.json",
+      "trades": "data/YTD_2025_1d_auto_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1d_mean_reversion",
+    "period": "YTD_2025_1d",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10279.470230210323,
+      "total_return_pct": 2.794702302103236,
+      "max_drawdown_pct": 0.0,
+      "sharpe_ratio": 8.237138659946604,
+      "num_trades": 3,
+      "win_rate_pct": 100.0,
+      "avg_win_pct": 2.7757576587578305,
+      "avg_loss_pct": 0.0,
+      "profit_factor": 999.0
+    },
+    "files": {
+      "equity": "data/YTD_2025_1d_mean_reversion_equity.json",
+      "trades": "data/YTD_2025_1d_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1d_trend_following",
+    "period": "YTD_2025_1d",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 8742.402988159938,
+      "total_return_pct": -12.575970118400615,
+      "max_drawdown_pct": -21.1197012369445,
+      "sharpe_ratio": -3.608291100047809,
+      "num_trades": 13,
+      "win_rate_pct": 30.76923076923077,
+      "avg_win_pct": 8.898181714345672,
+      "avg_loss_pct": -7.318650858578817,
+      "profit_factor": 0.3457095788282432
+    },
+    "files": {
+      "equity": "data/YTD_2025_1d_trend_following_equity.json",
+      "trades": "data/YTD_2025_1d_trend_following_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1h_auto",
+    "period": "YTD_2025",
+    "timeframe": "1h",
+    "strategy": "auto",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 9522.889567914372,
+      "total_return_pct": -4.771104320856279,
+      "max_drawdown_pct": -22.9293443618516,
+      "sharpe_ratio": -0.12220769060970692,
+      "num_trades": 272,
+      "win_rate_pct": 44.85294117647059,
+      "avg_win_pct": 3.051476586716108,
+      "avg_loss_pct": -1.8752783131754471,
+      "profit_factor": 0.947049549547932
+    },
+    "files": {
+      "equity": "data/YTD_2025_1h_auto_equity.json",
+      "trades": "data/YTD_2025_1h_auto_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1h_mean_reversion",
+    "period": "YTD_2025_1h",
+    "timeframe": "mean",
+    "strategy": "reversion",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10423.372771128925,
+      "total_return_pct": 4.233727711289248,
+      "max_drawdown_pct": -2.745264947132242,
+      "sharpe_ratio": 0.7766106249215867,
+      "num_trades": 272,
+      "win_rate_pct": 56.25,
+      "avg_win_pct": 0.49359421464715486,
+      "avg_loss_pct": -0.5269753654510183,
+      "profit_factor": 1.1966091550236237
+    },
+    "files": {
+      "equity": "data/YTD_2025_1h_mean_reversion_equity.json",
+      "trades": "data/YTD_2025_1h_mean_reversion_trades.json"
+    }
+  },
+  {
+    "id": "YTD_2025_1h_trend_following",
+    "period": "YTD_2025_1h",
+    "timeframe": "trend",
+    "strategy": "following",
+    "metrics": {
+      "initial_capital": 10000,
+      "final_value": 10021.411936246855,
+      "total_return_pct": 0.21411936246855667,
+      "max_drawdown_pct": -25.793058298321768,
+      "sharpe_ratio": 0.1065086105395903,
+      "num_trades": 194,
+      "win_rate_pct": 34.02061855670103,
+      "avg_win_pct": 6.195975685694741,
+      "avg_loss_pct": -2.2815895309629637,
+      "profit_factor": 1.0023913347625233
+    },
+    "files": {
+      "equity": "data/YTD_2025_1h_trend_following_equity.json",
+      "trades": "data/YTD_2025_1h_trend_following_trades.json"
+    }
+  }
+]
