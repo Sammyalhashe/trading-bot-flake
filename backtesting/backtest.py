@@ -20,7 +20,7 @@ from collections import defaultdict
 
 # Import strategy components
 from config import TradingConfig
-from core import TechnicalAnalysis, RegimeDetector
+from core import TechnicalAnalysis, RegimeDetector, RiskManager
 from strategies import create_strategy
 
 
@@ -41,6 +41,7 @@ class BacktestEngine:
         self.positions = {}  # asset -> {'size': float, 'entry': float, 'hwm': float, 'tp_flags': dict}
         self.trades = []
         self.equity_curve = []
+        self.total_fees = 0  # Track total fees paid
         self.ta = TechnicalAnalysis(
             ma_short_window=config.ma_short_window,
             ma_long_window=config.ma_long_window
@@ -51,6 +52,7 @@ class BacktestEngine:
             ma_long_window=config.ma_long_window,
             enable_btc_dominance=False  # Disabled for backtesting
         )
+        self.risk_manager = RiskManager(config, initial_capital)
 
     def load_data(self, csv_path: str) -> pd.DataFrame:
         """Load historical OHLCV data from CSV."""
@@ -274,12 +276,17 @@ class BacktestEngine:
             position_size = target_allocation / price
             cost = position_size * price
 
+            # Calculate buy fee (half of round-trip)
+            buy_fee = self.risk_manager.calculate_fees(cost, is_round_trip=False)
+            total_cost = cost + buy_fee
+
             # Check if we have enough capital
-            if cost > self.capital * 0.95:  # Leave 5% buffer
+            if total_cost > self.capital * 0.95:  # Leave 5% buffer
                 continue
 
-            # Open position
-            self.capital -= cost
+            # Open position (deduct cost + fee)
+            self.capital -= total_cost
+            self.total_fees += buy_fee
             self.positions[asset] = {
                 'size': position_size,
                 'entry': price,
@@ -293,10 +300,12 @@ class BacktestEngine:
                 'type': 'BUY',
                 'price': price,
                 'size': position_size,
-                'cost': cost
+                'cost': cost,
+                'fee': buy_fee
             })
 
-            logger.info(f"{timestamp} | BUY {asset} @ ${price:,.2f} | Size: {position_size:.6f} | Cost: ${cost:,.2f}")
+            logger.info(f"{timestamp} | BUY {asset} @ ${price:,.2f} | Size: {position_size:.6f} | "
+                       f"Cost: ${cost:,.2f} | Fee: ${buy_fee:,.2f}")
 
     def _close_position(self, asset: str, price: float, ratio: float,
                        reason: str, timestamp):
@@ -308,12 +317,17 @@ class BacktestEngine:
         sell_size = pos['size'] * ratio
         proceeds = sell_size * price
 
-        self.capital += proceeds
+        # Calculate sell fee (half of round-trip)
+        sell_fee = self.risk_manager.calculate_fees(proceeds, is_round_trip=False)
+        net_proceeds = proceeds - sell_fee
+
+        self.capital += net_proceeds
+        self.total_fees += sell_fee
         pos['size'] -= sell_size
 
-        # Calculate P&L
+        # Calculate P&L (including fees)
         cost_basis = pos['entry'] * sell_size
-        pnl = proceeds - cost_basis
+        pnl = net_proceeds - cost_basis
         pnl_pct = (price / pos['entry'] - 1) * 100
 
         self.trades.append({
@@ -323,13 +337,16 @@ class BacktestEngine:
             'price': price,
             'size': sell_size,
             'proceeds': proceeds,
+            'fee': sell_fee,
+            'net_proceeds': net_proceeds,
             'pnl': pnl,
             'pnl_pct': pnl_pct,
             'reason': reason
         })
 
         logger.info(f"{timestamp} | SELL {asset} @ ${price:,.2f} | Size: {sell_size:.6f} | "
-                   f"Proceeds: ${proceeds:,.2f} | P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%) | {reason}")
+                   f"Proceeds: ${proceeds:,.2f} | Fee: ${sell_fee:,.2f} | "
+                   f"Net P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%) | {reason}")
 
         # Remove position if fully closed
         if pos['size'] < 1e-8:
@@ -380,6 +397,8 @@ class BacktestEngine:
             'final_value': final_value,
             'total_return_pct': total_return,
             'max_drawdown_pct': max_drawdown,
+            'total_fees': self.total_fees,
+            'fees_pct_of_capital': (self.total_fees / self.initial_capital) * 100,
             'num_trades': num_trades,
             'win_rate_pct': win_rate,
             'avg_win_pct': avg_win,
@@ -403,6 +422,9 @@ def print_results(results: Dict):
     print(f"Total Return:        {results['total_return_pct']:+.2f}%")
     print(f"Max Drawdown:        {results['max_drawdown_pct']:.2f}%")
     print(f"Sharpe Ratio:        {results['sharpe_ratio']:.2f}")
+    print(f"\nFees & Costs:")
+    print(f"  Total Fees Paid:   ${results['total_fees']:,.2f}")
+    print(f"  Fees % of Capital: {results['fees_pct_of_capital']:.2f}%")
     print(f"\nTrade Statistics:")
     print(f"  Total Trades:      {results['num_trades']}")
     print(f"  Win Rate:          {results['win_rate_pct']:.1f}%")

@@ -23,9 +23,9 @@
   },
   {
     "id": "2023_Full_Year_15m_mean_reversion",
-    "period": "2023_Full_Year_15m",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "2023_Full_Year",
+    "timeframe": "15m",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10054.448551731288,
@@ -45,9 +45,9 @@
   },
   {
     "id": "2023_Full_Year_15m_trend_following",
-    "period": "2023_Full_Year_15m",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "2023_Full_Year",
+    "timeframe": "15m",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 12386.213145512436,
@@ -89,9 +89,9 @@
   },
   {
     "id": "2023_Full_Year_1d_mean_reversion",
-    "period": "2023_Full_Year_1d",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "2023_Full_Year",
+    "timeframe": "1d",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 9953.129467248296,
@@ -111,9 +111,9 @@
   },
   {
     "id": "2023_Full_Year_1d_trend_following",
-    "period": "2023_Full_Year_1d",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "2023_Full_Year",
+    "timeframe": "1d",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 11231.52249141411,
@@ -155,9 +155,9 @@
   },
   {
     "id": "2023_Full_Year_1h_mean_reversion",
-    "period": "2023_Full_Year_1h",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "2023_Full_Year",
+    "timeframe": "1h",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10232.942116070308,
@@ -177,9 +177,9 @@
   },
   {
     "id": "2023_Full_Year_1h_trend_following",
-    "period": "2023_Full_Year_1h",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "2023_Full_Year",
+    "timeframe": "1h",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 13973.864967506004,
@@ -221,9 +221,9 @@
   },
   {
     "id": "H2_2024_15m_mean_reversion",
-    "period": "H2_2024_15m",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "H2_2024",
+    "timeframe": "15m",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 11028.02442689873,
@@ -243,9 +243,9 @@
   },
   {
     "id": "H2_2024_15m_trend_following",
-    "period": "H2_2024_15m",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "H2_2024",
+    "timeframe": "15m",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 12646.297136471583,
@@ -287,9 +287,9 @@
   },
   {
     "id": "H2_2024_1h_mean_reversion",
-    "period": "H2_2024_1h",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "H2_2024",
+    "timeframe": "1h",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10207.98565960399,
@@ -309,9 +309,9 @@
   },
   {
     "id": "H2_2024_1h_trend_following",
-    "period": "H2_2024_1h",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "H2_2024",
+    "timeframe": "1h",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 11071.703143551702,
@@ -353,9 +353,9 @@
   },
   {
     "id": "Q1_2024_Bull_15m_mean_reversion",
-    "period": "Q1_2024_Bull_15m",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "Q1_2024_Bull",
+    "timeframe": "15m",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10232.25424861322,
@@ -375,9 +375,9 @@
   },
   {
     "id": "Q1_2024_Bull_15m_trend_following",
-    "period": "Q1_2024_Bull_15m",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "Q1_2024_Bull",
+    "timeframe": "15m",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 11483.438981578793,
@@ -419,9 +419,9 @@
   },
   {
     "id": "Q1_2024_Bull_1h_mean_reversion",
-    "period": "Q1_2024_Bull_1h",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "Q1_2024_Bull",
+    "timeframe": "1h",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10160.853799589546,
@@ -441,9 +441,9 @@
   },
   {
     "id": "Q1_2024_Bull_1h_trend_following",
-    "period": "Q1_2024_Bull_1h",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "Q1_2024_Bull",
+    "timeframe": "1h",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 12308.775929689298,
@@ -485,9 +485,9 @@
   },
   {
     "id": "Q2_2023_Sideways_15m_mean_reversion",
-    "period": "Q2_2023_Sideways_15m",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "15m",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 9908.466726684886,
@@ -507,9 +507,9 @@
   },
   {
     "id": "Q2_2023_Sideways_15m_trend_following",
-    "period": "Q2_2023_Sideways_15m",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "15m",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10637.47041011821,
@@ -551,9 +551,9 @@
   },
   {
     "id": "Q2_2023_Sideways_1h_mean_reversion",
-    "period": "Q2_2023_Sideways_1h",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "1h",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10286.704893583386,
@@ -573,9 +573,9 @@
   },
   {
     "id": "Q2_2023_Sideways_1h_trend_following",
-    "period": "Q2_2023_Sideways_1h",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "Q2_2023_Sideways",
+    "timeframe": "1h",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10686.691808139542,
@@ -617,9 +617,9 @@
   },
   {
     "id": "YTD_2025_15m_mean_reversion",
-    "period": "YTD_2025_15m",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "YTD_2025",
+    "timeframe": "15m",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 9678.63315838156,
@@ -639,9 +639,9 @@
   },
   {
     "id": "YTD_2025_15m_trend_following",
-    "period": "YTD_2025_15m",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "YTD_2025",
+    "timeframe": "15m",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 8841.873586206088,
@@ -683,9 +683,9 @@
   },
   {
     "id": "YTD_2025_1d_mean_reversion",
-    "period": "YTD_2025_1d",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "YTD_2025",
+    "timeframe": "1d",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10279.470230210323,
@@ -705,9 +705,9 @@
   },
   {
     "id": "YTD_2025_1d_trend_following",
-    "period": "YTD_2025_1d",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "YTD_2025",
+    "timeframe": "1d",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 8742.402988159938,
@@ -749,9 +749,9 @@
   },
   {
     "id": "YTD_2025_1h_mean_reversion",
-    "period": "YTD_2025_1h",
-    "timeframe": "mean",
-    "strategy": "reversion",
+    "period": "YTD_2025",
+    "timeframe": "1h",
+    "strategy": "mean_reversion",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10423.372771128925,
@@ -771,9 +771,9 @@
   },
   {
     "id": "YTD_2025_1h_trend_following",
-    "period": "YTD_2025_1h",
-    "timeframe": "trend",
-    "strategy": "following",
+    "period": "YTD_2025",
+    "timeframe": "1h",
+    "strategy": "trend_following",
     "metrics": {
       "initial_capital": 10000,
       "final_value": 10021.411936246855,
