@@ -16,7 +16,6 @@ class TradingConfig:
     portfolio_risk_pct: Decimal
     short_risk_pct: Decimal
     risk_per_trade_pct: Decimal
-    max_position_usd: Decimal
     max_drawdown_pct: Decimal
     drawdown_cooldown_hours: int
     min_order_usd: Decimal
@@ -86,7 +85,6 @@ class TradingConfig:
             portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.90")),
             short_risk_pct=Decimal(os.getenv("SHORT_RISK_PERCENTAGE", "0.05")),
             risk_per_trade_pct=Decimal(os.getenv("RISK_PER_TRADE_PCT", "0.95")),
-            max_position_usd=Decimal(os.getenv("MAX_POSITION_USD", "10000")),
             max_drawdown_pct=Decimal(os.getenv("MAX_DRAWDOWN_PCT", "15")),
             drawdown_cooldown_hours=int(os.getenv("DRAWDOWN_COOLDOWN_HOURS", "48")),
             min_order_usd=Decimal(os.getenv("MIN_ORDER_USD", "10")),
@@ -170,10 +168,6 @@ class TradingConfig:
 
         if not (0 < self.risk_per_trade_pct <= 1):
             errors.append(f"Risk per trade ({self.risk_per_trade_pct}) must be between 0 and 1")
-
-        # Position size validation
-        if self.max_position_usd < self.min_order_usd:
-            errors.append(f"Max position ({self.max_position_usd}) must be >= min order ({self.min_order_usd})")
 
         # RSI validation
         if not (0 < self.rsi_overbought <= 100):

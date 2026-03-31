@@ -356,11 +356,15 @@ Splitting across `TOP_MOMENTUM_COUNT=3` candidates means each trade gets ~5% of 
 ### Max Position Size
 
 ```python
-if current_asset_value + buy_size > MAX_POSITION_USD:
-    buy_size = max(0, MAX_POSITION_USD - current_asset_value)
+# Dynamic per-asset position cap: portfolio_value / max_positions.
+# Scales with account size instead of a fixed dollar amount.
+dynamic_max_position = ex_value / max(1, max_positions)
+current_asset_value = held_total.get(asset, 0) * price
+if current_asset_value + buy_size > dynamic_max_position:
+    buy_size = max(0, dynamic_max_position - current_asset_value)
 ```
 
-Even if the signals keep saying "buy BTC", the position is capped at $5,000. This prevents concentration risk.
+Even if the signals keep saying "buy BTC", each position is capped at a percentage of the portfolio (e.g., 33% if max positions = 3). This prevents concentration risk while allowing the bot to scale as the account grows.
 
 ### Drawdown Guard
 

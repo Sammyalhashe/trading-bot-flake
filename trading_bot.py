@@ -308,8 +308,18 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     except TypeError:
         # Executor doesn't support extra_tokens (e.g. CoinbaseExecutor scans all)
         bal = executor.get_balances()
-    cash = bal["cash"].get("USDC", 0.0)
-    held = bal["crypto"]
+
+    # Handle separate available and total balances
+    if "available" in bal and "total" in bal:
+        cash_avail = bal["available"]["cash"].get("USDC", 0.0)
+        held_avail = bal["available"]["crypto"]
+        cash_total = bal["total"]["cash"].get("USDC", 0.0)
+        held_total = bal["total"]["crypto"]
+    else:
+        # Fallback for other executors (legacy simple dict)
+        cash_avail = cash_total = bal["cash"].get("USDC", 0.0)
+        held_avail = held_total = bal["crypto"]
+
     state = load_state()
 
     # Reconcile state: clean up entry_prices for assets we no longer hold
@@ -325,7 +335,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         # Extract asset from key format "ExecutorId:ASSET-USDC"
         product_id_part = key[len(f"{ex_id}:"):]
         asset_part = product_id_part.split("-")[0]
-        balance = held.get(asset_part, 0.0)
+        # Use total balance for state reconciliation (don't clear if held in order)
+        balance = held_total.get(asset_part, 0.0)
         if balance <= 0:
             stale_keys.append(key)
     if stale_keys:
@@ -335,16 +346,16 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             clear_entry_price(ex_id, key[len(f"{ex_id}:"):])
         state = load_state()  # reload after cleanup
 
-    # Calculate local value
-    ex_value = cash
-    for asset, amt in held.items():
+    # Calculate local value using TOTAL balances
+    ex_value = cash_total
+    for asset, amt in held_total.items():
         details = data_provider.get_product_details(get_data_product_id(asset))
         if details:
             ex_value += amt * float(details['price'])
         else:
             logging.warning(f"[{ex_id}] Could not price {asset} (product_id={get_data_product_id(asset)}), excluding from portfolio value")
 
-    logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash:,.2f}")
+    logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
 
     # Update peak value and check drawdown (per-executor)
     peak = load_peak_value(ex_id)
@@ -391,7 +402,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             save_state(state)
 
     if reset_to_usdc:
-        for asset, amount in held.items():
+        for asset, amount in held_avail.items():
             if asset in ["USD", "USDC"] or is_asset_blacklisted(asset): continue
             executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount)
             clear_entry_price(ex_id, get_data_product_id(asset))
@@ -419,10 +430,10 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     asset_candidates = strategy.rank_candidates(asset_candidates)
 
     # Concurrent position guard: count non-stablecoin holdings for this executor
-    current_positions = sum(1 for a in held if a not in ("USD", "USDC") and held[a] > 0)
+    current_positions = sum(1 for a in held_total if a not in ("USD", "USDC") and held_total[a] > 0)
     max_positions = config.max_concurrent_positions
 
-    available_usdc = cash
+    available_usdc = cash_avail
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
         if current_positions >= max_positions:
@@ -438,7 +449,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             # Dynamic per-asset position cap: portfolio_value / max_positions.
             # Scales with account size instead of a fixed dollar amount.
             dynamic_max_position = ex_value / max(1, max_positions)
-            current_asset_value = held.get(asset, 0) * price
+            current_asset_value = held_total.get(asset, 0) * price
             if current_asset_value + buy_size > dynamic_max_position:
                 buy_size = max(0, dynamic_max_position - current_asset_value)
                 if buy_size < MIN_ORDER_USD:
@@ -482,7 +493,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
     # Manage Sells
-    for asset, amt in held.items():
+    for asset, amt in held_avail.items():
         if asset in ["USD", "USDC"]: continue
         product_id = get_data_product_id(asset)
         try:

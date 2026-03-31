@@ -57,26 +57,39 @@ class CoinbaseExecutor:
             if not data.get('has_next'): break
             path = f"/api/v3/brokerage/accounts?cursor={data['cursor']}"
 
-        balances = {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}}
+        # available: what we can trade right now
+        # total: available + held (used for portfolio valuation)
+        balances = {
+            "available": {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}},
+            "total": {"cash": {"USD": 0.0, "USDC": 0.0}, "crypto": {}}
+        }
         DUST_THRESHOLD_USD = 5.0  # Ignore balances worth less than $5
 
         for acc in all_accounts:
-            cur, val = acc['currency'], float(acc['available_balance']['value'])
-            if cur in balances['cash']:
-                balances['cash'][cur] = val
-            elif val > 0:
+            cur = acc['currency']
+            avail = float(acc['available_balance']['value'])
+            held = float(acc['hold']['value'])
+            total = avail + held
+            
+            # Cash handles
+            if cur in balances['available']['cash']:
+                balances['available']['cash'][cur] = avail
+                balances['total']['cash'][cur] = total
+            elif total > 0:
                 # Always include ETH/WETH regardless of amount (needed for gas)
                 if cur in ('WETH', 'ETH'):
-                    balances['crypto'][cur] = val
+                    if avail > 0: balances['available']['crypto'][cur] = avail
+                    balances['total']['crypto'][cur] = total
                 else:
                     # Filter out dust: only include if worth more than threshold
                     details = self.get_product_details(f"{cur}-USDC")
                     if details and 'price' in details:
-                        usd_value = val * float(details['price'])
+                        usd_value = total * float(details['price'])
                         if usd_value >= DUST_THRESHOLD_USD:
-                            balances['crypto'][cur] = val
+                            if avail > 0: balances['available']['crypto'][cur] = avail
+                            balances['total']['crypto'][cur] = total
                         else:
-                            logging.debug(f"Ignoring dust balance: {cur} {val} (~${usd_value:.2f})")
+                            logging.debug(f"Ignoring dust balance: {cur} {total} (~${usd_value:.2f})")
         return balances
 
     def get_market_data(self, product_id, window):
