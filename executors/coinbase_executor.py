@@ -254,6 +254,11 @@ class CoinbaseExecutor:
 
     def get_supported_assets(self):
         """Return list of assets supported by Coinbase for trading."""
-        # For now, return the fixed list used in the trading bot.
-        # In future, could fetch dynamically from Coinbase API.
-        return ["BTC", "ETH", "MATIC", "AVAX", "SUI", "SOL", "ADA", "DOGE", "XRP", "LINK"]
+        # Focus on established, serious projects:
+        # - BTC, ETH: Blue chips
+        # - SOL, AVAX, SUI: Major L1s
+        # - LINK: Oracle infrastructure
+        # - POL (MATIC): Ethereum scaling
+        # - UNI, AAVE: Blue-chip DeFi protocols
+        # - ONDO: Real World Assets (RWA)
+        return ["BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO"]
