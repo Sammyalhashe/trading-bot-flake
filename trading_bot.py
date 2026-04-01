@@ -49,16 +49,8 @@ regime_detector = RegimeDetector(
 risk_manager = RiskManager(config, initial_capital=10000, state_manager=state_manager)
 
 # --- Logging Configuration ---
-os.makedirs(os.path.dirname(exec_config.log_file), exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(exec_config.log_file),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+from core.logging_config import setup_logging
+setup_logging(exec_config.log_file)
 
 # Log configuration
 logging.info(f"Using {config.trend_asset} for market regime detection")
