@@ -39,6 +39,9 @@
             cp -r $src/executors $out/bin/executors
             cp -r $src/backtesting $out/bin/backtesting
 
+            # Ensure everything in $out/bin is writable before wrapping
+            chmod -R +w $out/bin
+
             # Rename main entry point
             mv $out/bin/trading_bot.py $out/bin/trading-bot
             chmod +x $out/bin/trading-bot

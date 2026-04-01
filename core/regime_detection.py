@@ -215,9 +215,9 @@ class RegimeDetector:
 
         elif btc_macro == "BEAR":
             if rotation_signal == "BTC_LEADING":
-                regime = "BEAR"
-            elif rotation_signal == "ETH_LEADING":
                 regime = "STRONG_BEAR"
+            elif rotation_signal == "ETH_LEADING":
+                regime = "BEAR"
             else:  # NEUTRAL_RATIO
                 regime = "BEAR"
 
