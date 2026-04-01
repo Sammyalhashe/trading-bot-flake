@@ -9,6 +9,7 @@ venv/
 historical_data/
 equity_curve_*.csv
 trades_*.csv
+*_candles_*.csv
 
 # Runtime state — managed by the bot, not by git
 trading_state.json
