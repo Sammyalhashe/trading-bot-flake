@@ -396,6 +396,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 available_cash=available_usdc,
                 executor_value=ex_value
             )
+            # Scale down position in BEAR regime
+            if market_regime == "BEAR" and config.bear_position_scale < 1.0:
+                buy_size *= config.bear_position_scale
+                if buy_size >= float(config.min_order_usd):
+                    logging.info(f"[{ex_id}] Bear scaling: {asset} position reduced to {config.bear_position_scale:.0%}")
             if buy_size < float(config.min_order_usd):
                 if size_msg != "Normal position sizing":
                     logging.info(f"[{ex_id}] Skipping {asset}: {size_msg}")
@@ -649,7 +654,7 @@ def _run_bot(reset_to_usdc=False):
             "STRONG_BULL": "BTC trending up + Alts outperforming (ETH leading)",
             "BULL": "BTC trending up + BTC outperforming (capital in BTC)",
             "NEUTRAL": "BTC sideways or conflicting signals",
-            "BEAR": "BTC trending down + BTC outperforming (defensive)",
+            "BEAR": "BTC trending down + Alts holding up (ETH outperforming)",
             "STRONG_BEAR": "BTC trending down + Alts dumping harder (high risk)"
         }
         explanation = regime_explanation.get(full_regime, "Unknown regime")

@@ -273,6 +273,13 @@ class BacktestEngine:
             # Position sizing: equal allocation
             portfolio_value = self.get_portfolio_value(prices)
             target_allocation = portfolio_value / max_concurrent_positions
+
+            # Scale down in BEAR regime
+            if market_regime == "BEAR" and self.config.bear_position_scale < 1.0:
+                target_allocation *= self.config.bear_position_scale
+                if target_allocation < 10:
+                    continue  # Skip tiny allocations
+
             position_size = target_allocation / price
             cost = position_size * price
 

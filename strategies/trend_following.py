@@ -21,20 +21,64 @@ class TrendFollowingStrategy:
     def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
         ma_s, ma_l = self.ta.analyze_trend(df)
 
-        # BTC exemption: allow BTC buys in BEAR if configured
-        allow_buy = market_regime == "BULL" or (self.config.allow_btc_in_bear and asset == "BTC")
-        # Skip all new entries in NEUTRAL regime
-        if full_regime == "NEUTRAL":
-            allow_buy = False
+        # BEAR regime: use momentum+RSI entry (MA crossover can't fire in BEAR)
+        if market_regime == "BEAR":
+            if self.config.bear_position_scale > 0:
+                return self._bear_momentum_entry(asset, product_id, df)
+            elif self.config.allow_btc_in_bear and asset == "BTC":
+                # Legacy BTC exemption (requires MA crossover — rarely triggers)
+                if ma_s and ma_l and ma_s > ma_l * 1.002 and self.ta.is_crossover_confirmed(df, "bull"):
+                    logger.info(f"BTC bear-market exemption triggered (hedging strategy)")
+                    return self._standard_entry_checks(asset, product_id, df)
+            return None
 
-        if not (ma_s and ma_l and ma_s > ma_l * 1.002 and allow_buy):
+        # NEUTRAL: skip entries
+        if full_regime == "NEUTRAL":
+            return None
+
+        # BULL: standard MA crossover entry
+        if not (ma_s and ma_l and ma_s > ma_l * 1.002):
             return None
         if not self.ta.is_crossover_confirmed(df, "bull"):
             return None
 
-        # Log BTC bear-market exemption
-        if market_regime == "BEAR" and asset == "BTC" and self.config.allow_btc_in_bear:
-            logger.info(f"BTC bear-market exemption triggered (hedging strategy)")
+        return self._standard_entry_checks(asset, product_id, df)
+
+    def _standard_entry_checks(self, asset: str, product_id: str, df) -> dict | None:
+        """Volume, RSI, and momentum checks shared by all entry paths."""
+        min_volume = float(self.config.min_24h_volume_usd)
+        if df is not None and len(df) >= 24:
+            volume_24h = df['volume'].iloc[-24:].sum()
+            close_price = df['close'].iloc[-1]
+            usd_volume_24h = volume_24h * close_price
+            if usd_volume_24h < min_volume:
+                return None
+
+        rsi = self.ta.calculate_rsi(df)
+        if rsi is not None and rsi > float(self.config.rsi_overbought):
+            return None
+
+        momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
+        return {"asset": asset, "product_id": product_id, "score": momentum}
+
+    def _bear_momentum_entry(self, asset: str, product_id: str, df) -> dict | None:
+        """Entry signal for BEAR regime: momentum + RSI instead of MA crossover.
+
+        Uses short-term momentum (>2% in 24h) and RSI not overbought as entry
+        criteria. This allows catching rallies during bear markets since the
+        standard MA crossover can't fire when regime MAs are bearish.
+        """
+        momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
+        if momentum < 2.0:  # Require >2% 24h momentum to enter in BEAR
+            return None
+
+        rsi = self.ta.calculate_rsi(df)
+        if rsi is None:
+            return None
+        if rsi > float(self.config.rsi_overbought):
+            return None
+        if rsi < 35:  # Skip deeply oversold — likely a dump, not a rally
+            return None
 
         # Volume filter
         min_volume = float(self.config.min_24h_volume_usd)
@@ -45,12 +89,7 @@ class TrendFollowingStrategy:
             if usd_volume_24h < min_volume:
                 return None
 
-        # RSI filter: skip overbought
-        rsi = self.ta.calculate_rsi(df)
-        if rsi is not None and rsi > float(self.config.rsi_overbought):
-            return None
-
-        momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
+        logger.info(f"Bear momentum entry: {asset} momentum={momentum:+.1f}% RSI={rsi:.0f}")
         return {"asset": asset, "product_id": product_id, "score": momentum}
 
     def rank_candidates(self, candidates: list[dict]) -> list[dict]:
