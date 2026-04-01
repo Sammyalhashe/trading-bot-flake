@@ -24,6 +24,7 @@ class TradingConfig:
     enable_dual_regime: bool
     enable_btc_dominance: bool
     allow_btc_in_bear: bool
+    bear_position_scale: float
 
     # Technical Indicators
     rsi_overbought: Decimal
@@ -72,10 +73,12 @@ class TradingConfig:
             trend_asset = "BTC"  # fallback to BTC if invalid
 
         return cls(
-            # Moving Averages — 50/200 is the "golden cross" standard for trend
-            # following. Slower than 20/50 but far fewer false signals in crypto.
-            ma_short_window=int(os.getenv("SHORT_WINDOW", "50")),
-            ma_long_window=int(os.getenv("LONG_WINDOW", "200")),
+            # Moving Averages — 20/100 balances responsiveness with signal quality.
+            # Backtested across 5 periods (2023-2026): MA20/100 trend_following
+            # returned +5.87% avg (Sharpe 1.51) vs MA50/200 at +4.60% (Sharpe 1.34).
+            # Faster regime detection catches rallies sooner without excessive whipsaw.
+            ma_short_window=int(os.getenv("SHORT_WINDOW", "20")),
+            ma_long_window=int(os.getenv("LONG_WINDOW", "100")),
 
             # Risk Management
             portfolio_risk_pct=Decimal(os.getenv("PORTFOLIO_RISK_PERCENTAGE", "0.90")),
@@ -89,6 +92,9 @@ class TradingConfig:
             enable_dual_regime=os.getenv("ENABLE_DUAL_REGIME", "true").lower() == "true",
             enable_btc_dominance=os.getenv("ENABLE_BTC_DOMINANCE", "false").lower() == "true",
             allow_btc_in_bear=os.getenv("ALLOW_BTC_IN_BEAR", "true").lower() == "true",
+            # Bear position scaling: 0.0 = no trades in BEAR (old behavior),
+            # 0.25 = 25% position size, 1.0 = full size. Backtested best at 0.25.
+            bear_position_scale=float(os.getenv("BEAR_POSITION_SCALE", "0.25")),
 
             # Technical Indicators
             rsi_overbought=Decimal(os.getenv("RSI_OVERBOUGHT", "75")),
@@ -107,11 +113,11 @@ class TradingConfig:
             take_profit_2_sell_ratio=Decimal(os.getenv("TAKE_PROFIT_2_SELL_RATIO", "0.35")),
 
             # Strategy Selection
-            # Default to 'auto' (regime-adaptive) based on comprehensive backtesting:
-            # - avg +10.36% return, 1.47 Sharpe, 50.3% win rate
-            # - Adapts to market conditions (trend_following in bull, mean_reversion in sideways/bear)
-            # - Consistently positive across all tested periods including recent 2025-2026
-            strategy=os.getenv("STRATEGY", "auto"),
+            # Default to 'trend_following' — backtested combined (MA20/100 + bear0.25):
+            # +7.28% avg return, 1.76 Sharpe, -6.78% maxDD across 5 periods.
+            # 'auto' underperforms due to mean_reversion losses in volatile markets
+            # (-26.70% YTD_2025 vs -6.11% for trend_following).
+            strategy=os.getenv("STRATEGY", "trend_following"),
 
             # Mean-Reversion Parameters (only used if STRATEGY=mean_reversion)
             mr_rsi_oversold=Decimal(os.getenv("MR_RSI_OVERSOLD", "30")),
