@@ -246,8 +246,9 @@ class RiskManager:
         if not allowed:
             return False, reason
 
-        # 2. Check position count limit
-        if existing_positions >= max_positions:
+        # 2. Check position count limit (allow adding to existing positions)
+        is_existing_position = current_asset_value > 0
+        if existing_positions >= max_positions and not is_existing_position:
             return False, f"At maximum positions ({existing_positions}/{max_positions})"
 
         # 3. Check minimum order size

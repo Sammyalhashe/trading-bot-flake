@@ -170,13 +170,13 @@ def save_state(state):
         state_manager.lock_file = STATE_FILE.with_suffix('.lock')
     return state_manager.save_state(state)
 
-def update_entry_price(executor_id, product_id, price):
+def update_entry_price(executor_id, product_id, price, existing_qty=0.0, new_qty=0.0):
     """Wrapper for backward compatibility"""
     # Update state_manager's state_file in case STATE_FILE was patched (for tests)
     if state_manager.state_file != STATE_FILE:
         state_manager.state_file = STATE_FILE
         state_manager.lock_file = STATE_FILE.with_suffix('.lock')
-    return state_manager.update_entry_price(executor_id, product_id, price)
+    return state_manager.update_entry_price(executor_id, product_id, price, existing_qty, new_qty)
 
 def clear_entry_price(executor_id, product_id):
     """Wrapper for backward compatibility"""
@@ -372,7 +372,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     available_usdc = cash_avail
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
-        if current_positions >= max_positions:
+        already_holds = held_total.get(asset, 0) > 0
+        if current_positions >= max_positions and not already_holds:
             logging.info(f"[{ex_id}] Skipping {asset}: at max concurrent positions ({current_positions}/{max_positions})")
             continue
         try:
@@ -400,6 +401,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             if not trading_allowed:
                 continue  # Skip buys when circuit breakers are active
             if buy_size >= float(config.min_order_usd):
+                existing_qty = held_total.get(asset, 0)
+                new_qty = buy_size / price
                 result = executor.place_limit_order(product_id, 'BUY', price, amount_quote_currency=buy_size)
                 if result:
                     # Confirm fill before updating entry price
@@ -407,9 +410,10 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     if isinstance(result, dict):
                         # Check if on-chain swap was confirmed via receipt
                         if result.get("confirmed"):
-                            update_entry_price(ex_id, product_id, price)
+                            update_entry_price(ex_id, product_id, price, existing_qty, new_qty)
                             available_usdc -= buy_size
-                            current_positions += 1
+                            if not already_holds:
+                                current_positions += 1
                             logging.info(f"[{ex_id}] Buy {asset} confirmed on-chain at ${price:,.2f}")
                         elif result.get("success") is False:
                             logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
@@ -419,17 +423,20 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                             if order_id and hasattr(executor, 'check_order_filled'):
                                 filled_price = executor.check_order_filled(order_id)
                                 if filled_price:
-                                    update_entry_price(ex_id, product_id, filled_price)
+                                    new_qty_filled = buy_size / filled_price
+                                    update_entry_price(ex_id, product_id, filled_price, existing_qty, new_qty_filled)
                                     available_usdc -= buy_size
-                                    current_positions += 1
+                                    if not already_holds:
+                                        current_positions += 1
                                     logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
                                 else:
                                     logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
                             else:
                                 # Paper mode — use requested price
-                                update_entry_price(ex_id, product_id, price)
+                                update_entry_price(ex_id, product_id, price, existing_qty, new_qty)
                                 available_usdc -= buy_size
-                                current_positions += 1
+                                if not already_holds:
+                                    current_positions += 1
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 

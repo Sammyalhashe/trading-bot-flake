@@ -74,21 +74,37 @@ class StateManager:
         finally:
             self._release_lock(lock_fd)
 
-    def update_entry_price(self, executor_id: str, product_id: str, price: float | Decimal) -> None:
-        """Track position entry with initial high water mark"""
+    def update_entry_price(
+        self, executor_id: str, product_id: str, price: float | Decimal,
+        existing_qty: float = 0.0, new_qty: float = 0.0
+    ) -> None:
+        """Track position entry with initial high water mark.
+
+        When adding to an existing position (existing_qty > 0), computes a
+        weighted-average entry price and preserves HWM / TP flags.
+        """
         state = self.load_state()
         key = f"{executor_id}:{product_id}"
-        state.setdefault("entry_prices", {})[key] = float(price)
-        # Initialize high water mark to entry price
-        state.setdefault("high_water_marks", {})[key] = float(price)
-        # Reset take-profit flags for new entry
-        state.setdefault("take_profit_flags", {})[key] = {
-            "tp1_hit": False,
-            "tp2_hit": False,
-            "trend_exit_hit": False
-        }
-        # Store entry timestamp for time-based exits
-        state.setdefault("entry_timestamps", {})[key] = time.time()
+        old_entry = state.get("entry_prices", {}).get(key)
+
+        if old_entry and existing_qty > 0 and new_qty > 0:
+            # Weighted-average cost basis
+            avg_price = (old_entry * existing_qty + float(price) * new_qty) / (existing_qty + new_qty)
+            state.setdefault("entry_prices", {})[key] = avg_price
+            # Keep existing HWM (only raise it if new avg is higher)
+            hwm = state.get("high_water_marks", {}).get(key, avg_price)
+            state.setdefault("high_water_marks", {})[key] = max(hwm, avg_price)
+            # Preserve take-profit flags and entry timestamp
+        else:
+            # Brand-new position
+            state.setdefault("entry_prices", {})[key] = float(price)
+            state.setdefault("high_water_marks", {})[key] = float(price)
+            state.setdefault("take_profit_flags", {})[key] = {
+                "tp1_hit": False,
+                "tp2_hit": False,
+                "trend_exit_hit": False
+            }
+            state.setdefault("entry_timestamps", {})[key] = time.time()
         self.save_state(state)
 
     def clear_entry_price(self, executor_id: str, product_id: str) -> None:
