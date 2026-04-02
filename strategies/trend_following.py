@@ -99,6 +99,7 @@ class TrendFollowingStrategy:
                    entry: float, hwm: float, tp_flags: dict,
                    state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
         sell_trigger = False
+        current_price = df["close"].iloc[-1]
         sell_ratio = 1.0
         reason = ""
 
@@ -148,7 +149,7 @@ class TrendFollowingStrategy:
         # Priority 4: Trend-exit (MA cross) — fires once per entry
         if not sell_trigger and not tp_flags.get("trend_exit_hit", False):
             ma_s, ma_l = self.ta.analyze_trend(df)
-            if ma_s and ma_l and ma_s < ma_l * 0.998:
+            if ma_s and ma_l and (ma_s < ma_l * 0.998 or current_price < ma_l * 0.99):
                 sell_trigger = True
                 sell_ratio = 0.5
                 reason = f"Trend-exit (50%) triggered for {asset}"

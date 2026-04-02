@@ -141,22 +141,26 @@ class RiskManager:
         existing_positions: int,
         max_positions: int,
         available_cash: float = None,
-        executor_value: float = None
+        executor_value: float = None,
+        atr: float = None
     ) -> float:
         """Calculate safe position size with all limits applied.
 
-        This implements the position sizing logic from trading_bot.py lines 424-449.
+        Includes volatility adjustment if ATR is provided:
+        - Higher volatility (ATR) -> smaller position
+        - Lower volatility -> larger position (capped by risk limits)
 
         Args:
             portfolio_value: Total portfolio value
             price: Asset price
             existing_positions: Number of current positions
             max_positions: Maximum allowed positions
-            available_cash: Available cash (if None, uses portfolio_value)
-            executor_value: Optional per-executor value for multi-executor mode
+            available_cash: Available cash
+            executor_value: Optional per-executor value
+            atr: Average True Range for volatility scaling
 
         Returns:
-            Position size in USD (not asset units)
+            Position size in USD
         """
         # Use executor_value if provided, otherwise portfolio_value
         reference_value = executor_value if executor_value is not None else portfolio_value
@@ -164,26 +168,34 @@ class RiskManager:
         # Use available_cash if provided, otherwise assume full portfolio
         cash = available_cash if available_cash is not None else reference_value
 
-        # Calculate trade limit based on risk parameters
-        # portfolio_risk_pct * risk_per_trade_pct gives the maximum per-trade allocation
+        # Base limit from risk parameters
         portfolio_risk = float(self.config.portfolio_risk_pct)
         risk_per_trade = float(self.config.risk_per_trade_pct)
         trade_limit = reference_value * portfolio_risk * risk_per_trade
 
+        # Volatility adjustment (ATR scaling)
+        # Normalizes sizing: aim for a loss of X% of trade if price moves 2.5 * ATR
+        vol_multiplier = 1.0
+        if atr and price > 0:
+            # 2.5 * ATR is our typical stop distance. 
+            # We want that distance to represent roughly 5% of the position value.
+            # risk_distance = 2.5 * atr
+            # target_risk_pct = 0.05
+            # normalized_size = (target_risk_pct / (risk_distance / price)) * base_size
+            
+            risk_pct = (2.5 * atr) / price
+            if risk_pct > 0:
+                # Scale multiplier: if risk is 5%, mult=1.0. If risk is 10%, mult=0.5.
+                vol_multiplier = 0.05 / risk_pct
+                vol_multiplier = max(0.5, min(1.5, vol_multiplier))
+                logger.info(f"Volatility scaling: ATR={atr:.2f} Risk={risk_pct*100:.1f}% -> Multiplier {vol_multiplier:.2f}x")
+
         # Equal-weight across remaining position slots
-        # This prevents capital from sitting idle
         slots_remaining = max(1, max_positions - existing_positions)
+        buy_size = min(cash / slots_remaining, (trade_limit / slots_remaining) * vol_multiplier)
 
-        # Size per slot is the smaller of:
-        # 1. Available cash divided across remaining slots
-        # 2. Trade limit divided across remaining slots
-        buy_size = min(cash / slots_remaining, trade_limit / slots_remaining)
-
-        # Dynamic per-asset position cap: scales with account size
-        # Instead of a fixed dollar amount, use portfolio_value / max_positions
+        # Dynamic per-asset position cap
         dynamic_max_position = reference_value / max(1, max_positions)
-
-        # Cap the position size to the dynamic max
         buy_size = min(buy_size, dynamic_max_position)
 
         return buy_size
@@ -406,7 +418,8 @@ class RiskManager:
         max_positions: int,
         current_asset_value: float,
         available_cash: float = None,
-        executor_value: float = None
+        executor_value: float = None,
+        atr: float = None
     ) -> tuple[float, str]:
         """Calculate position size considering existing holdings in the asset.
 
@@ -421,6 +434,7 @@ class RiskManager:
             current_asset_value: Current USD value held in this specific asset
             available_cash: Available cash
             executor_value: Optional per-executor value
+            atr: Average True Range for volatility scaling
 
         Returns:
             (buy_size, message) tuple:
@@ -434,7 +448,8 @@ class RiskManager:
             existing_positions=existing_positions,
             max_positions=max_positions,
             available_cash=available_cash,
-            executor_value=executor_value
+            executor_value=executor_value,
+            atr=atr
         )
 
         # Apply per-asset concentration limit

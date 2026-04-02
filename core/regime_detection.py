@@ -45,14 +45,15 @@ class RegimeDetector:
             df = data_provider.get_market_data("BTC-USDC", self.ma_long_window)
             s_ma, l_ma = self.tech.analyze_trend(df)
 
+            current_price = df["close"].iloc[-1]
             if s_ma is None or l_ma is None:
                 logger.warning("BTC trend: Insufficient data")
                 return "FLAT"
 
             # Apply buffer to prevent whipsaw
-            if s_ma > l_ma * (1 + buffer_pct):
+            if s_ma > l_ma * (1 + buffer_pct) and current_price > l_ma:
                 trend = "BULL"
-            elif s_ma < l_ma * (1 - buffer_pct):
+            elif s_ma < l_ma * (1 - buffer_pct) or current_price < l_ma * (1 - buffer_pct * 2):
                 trend = "BEAR"
             else:
                 trend = "FLAT"

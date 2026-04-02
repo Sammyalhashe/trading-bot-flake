@@ -452,6 +452,8 @@ def main():
                        help='Strategies to test: mean_reversion, trend_following, supertrend, auto')
     parser.add_argument('--initial-capital', type=float, default=10000,
                        help='Initial capital in USD (default: 10000)')
+    parser.add_argument('--ma-short', type=int, help='Override short MA window')
+    parser.add_argument('--ma-long', type=int, help='Override long MA window')
     parser.add_argument('--output', type=str, default='backtest_results.csv',
                        help='Output file for results')
 
@@ -478,6 +480,10 @@ def main():
 
     # Load configuration
     config = TradingConfig.from_env()
+    if args.ma_short:
+        config.ma_short_window = args.ma_short
+    if args.ma_long:
+        config.ma_long_window = args.ma_long
 
     # Run backtests for each strategy
     all_results = []

@@ -380,6 +380,14 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             price_data = data_provider.get_product_details(product_id)
             price = float(price_data['price'])
             current_asset_value = held_total.get(asset, 0) * price
+
+            # Calculate ATR for volatility-adjusted position sizing
+            atr = None
+            if hasattr(data_provider, 'get_market_data'):
+                df = data_provider.get_market_data(product_id, 20)
+                if df is not None:
+                    atr = ta.calculate_atr(df)
+
             buy_size, size_msg = risk_manager.calculate_position_with_existing(
                 portfolio_value=ex_value,
                 price=price,
@@ -387,7 +395,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 max_positions=max_positions,
                 current_asset_value=current_asset_value,
                 available_cash=available_usdc,
-                executor_value=ex_value
+                executor_value=ex_value,
+                atr=atr
             )
             # Scale down position in BEAR regime
             if market_regime == "BEAR" and config.bear_position_scale < 1.0:
@@ -618,9 +627,9 @@ def _run_bot(reset_to_usdc=False):
         if btc_s and btc_l:
             btc_price = btc_df['close'].iloc[-1] if len(btc_df) > 0 else None
             ma_spread_pct = ((btc_s / btc_l) - 1) * 100
-            if btc_s > btc_l * 1.002:
+            if btc_s > btc_l * 1.002 and btc_price > btc_l:
                 btc_macro = "BULL"
-            elif btc_s < btc_l * 0.998:
+            elif btc_s < btc_l * 0.998 or btc_price < btc_l * 0.996:
                 btc_macro = "BEAR"
             else:
                 btc_macro = "FLAT"

@@ -54,6 +54,17 @@ TIMEFRAMES = {
 
 STRATEGIES = ["mean_reversion", "trend_following", "supertrend", "auto"]
 
+# MA ratios to test for trend-following strategies
+MA_RATIOS = [
+    (20, 100),  # Current default
+    (20, 50),   # Faster default
+    (21, 55),   # Fibonacci based
+    (10, 30),   # Aggressive/Fast
+    (9, 21),    # Very Aggressive
+]
+
+
+import sys
 
 def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
     """Download historical data for a specific period and timeframe."""
@@ -61,11 +72,12 @@ def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
 
     logger.info(f"Downloading {period_key} data at {timeframe_key} timeframe...")
 
-    # Use path relative to this script's location
+    # Use absolute path and sys.executable
     script_dir = Path(__file__).parent
     download_script = script_dir / "download_historical_data.py"
 
     cmd = [
+        sys.executable,
         str(download_script),
         "--symbols", *symbols,
         "--start", period["start"],
@@ -84,25 +96,31 @@ def download_data(symbols, period_key, timeframe_key, timeframe_seconds):
         return False
 
 
-def run_backtest(symbols, period_key, timeframe_key, strategy, initial_capital):
+def run_backtest(symbols, period_key, timeframe_key, strategy, initial_capital, ma_short=None, ma_long=None):
     """Run backtest for a specific configuration."""
     script_dir = Path(__file__).parent
     backtest_script = script_dir / "backtest.py"
     data_dir = f"data/backtest/{period_key}_{timeframe_key}"
-    output_prefix = f"data/results/{period_key}_{timeframe_key}_{strategy}"
+    
+    ma_suffix = f"_MA{ma_short}_{ma_long}" if ma_short and ma_long else ""
+    output_prefix = f"data/results/{period_key}_{timeframe_key}_{strategy}{ma_suffix}"
 
-    logger.info(f"Testing {strategy} on {period_key} ({timeframe_key})...")
+    logger.info(f"Testing {strategy}{ma_suffix} on {period_key} ({timeframe_key})...")
 
     # Create results directory
     Path("data/results").mkdir(parents=True, exist_ok=True)
 
     cmd = [
+        sys.executable,
         str(backtest_script),
         "--data-dir", data_dir,
         "--symbols", *symbols,
         "--strategies", strategy,
         "--initial-capital", str(initial_capital),
     ]
+
+    if ma_short and ma_long:
+        cmd.extend(["--ma-short", str(ma_short), "--ma-long", str(ma_long)])
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -121,7 +139,10 @@ def run_backtest(symbols, period_key, timeframe_key, strategy, initial_capital):
         # Add metadata
         metrics["period"] = period_key
         metrics["timeframe"] = timeframe_key
-        metrics["strategy"] = strategy
+        metrics["strategy"] = f"{strategy}{ma_suffix}"
+        metrics["base_strategy"] = strategy
+        metrics["ma_short"] = ma_short
+        metrics["ma_long"] = ma_long
 
         # Move files to results directory
         new_equity = f"{output_prefix}_equity_curve.csv"
@@ -131,6 +152,13 @@ def run_backtest(symbols, period_key, timeframe_key, strategy, initial_capital):
             Path(trades_file).rename(new_trades)
 
         return metrics
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Backtest failed: {e.stderr}")
+        return None
+    except Exception as e:
+        logger.error(f"Error processing results: {e}")
+        return None
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Backtest failed: {e.stderr}")
@@ -236,41 +264,41 @@ def generate_report(all_results):
     # 2. Best timeframe per strategy
     print("\n\n📈 BEST TIMEFRAME BY STRATEGY")
     print("-"*100)
-    for strategy in STRATEGIES:
-        strategy_data = df[df['strategy'] == strategy]
+    for strategy in df['base_strategy'].unique():
+        strategy_data = df[df['base_strategy'] == strategy]
         best = strategy_data.loc[strategy_data['total_return_pct'].idxmax()]
         worst = strategy_data.loc[strategy_data['total_return_pct'].idxmin()]
 
         print(f"\n{strategy.upper()}")
-        print(f"  Best:  {best['timeframe']} in {best['period']} → {best['total_return_pct']:+.2f}% "
+        print(f"  Best:  {best['strategy']} @ {best['timeframe']} in {best['period']} → {best['total_return_pct']:+.2f}% "
               f"(Sharpe: {best['sharpe_ratio']:.2f})")
-        print(f"  Worst: {worst['timeframe']} in {worst['period']} → {worst['total_return_pct']:+.2f}% "
+        print(f"  Worst: {worst['strategy']} @ {worst['timeframe']} in {worst['period']} → {worst['total_return_pct']:+.2f}% "
               f"(Sharpe: {worst['sharpe_ratio']:.2f})")
 
     # 3. Overall best configurations
     print("\n\n🏆 TOP 10 CONFIGURATIONS (by Return)")
     print("-"*100)
     top10 = df.nlargest(10, 'total_return_pct')
-    print(f"{'Rank':<5} {'Strategy':<18} {'Timeframe':<10} {'Period':<18} {'Return':<10} {'Sharpe':<8} {'MaxDD':<8}")
+    print(f"{'Rank':<5} {'Strategy':<25} {'Timeframe':<10} {'Period':<18} {'Return':<10} {'Sharpe':<8} {'MaxDD':<8}")
     print("-"*100)
     for idx, (i, row) in enumerate(top10.iterrows(), 1):
-        print(f"{idx:<5} {row['strategy']:<18} {row['timeframe']:<10} {row['period']:<18} "
+        print(f"{idx:<5} {row['strategy']:<25} {row['timeframe']:<10} {row['period']:<18} "
               f"{row['total_return_pct']:>+8.2f}% {row['sharpe_ratio']:>7.2f} {row['max_drawdown_pct']:>7.2f}%")
 
     # 4. Risk-adjusted best (by Sharpe)
     print("\n\n🎯 TOP 10 CONFIGURATIONS (by Risk-Adjusted Return / Sharpe Ratio)")
     print("-"*100)
     top10_sharpe = df.nlargest(10, 'sharpe_ratio')
-    print(f"{'Rank':<5} {'Strategy':<18} {'Timeframe':<10} {'Period':<18} {'Sharpe':<8} {'Return':<10} {'MaxDD':<8}")
+    print(f"{'Rank':<5} {'Strategy':<25} {'Timeframe':<10} {'Period':<18} {'Sharpe':<8} {'Return':<10} {'MaxDD':<8}")
     print("-"*100)
     for idx, (i, row) in enumerate(top10_sharpe.iterrows(), 1):
-        print(f"{idx:<5} {row['strategy']:<18} {row['timeframe']:<10} {row['period']:<18} "
+        print(f"{idx:<5} {row['strategy']:<25} {row['timeframe']:<10} {row['period']:<18} "
               f"{row['sharpe_ratio']:>7.2f} {row['total_return_pct']:>+8.2f}% {row['max_drawdown_pct']:>7.2f}%")
 
     # 5. Strategy comparison across all conditions
-    print("\n\n📊 AVERAGE PERFORMANCE BY STRATEGY (across all conditions)")
+    print("\n\n📊 AVERAGE PERFORMANCE BY BASE STRATEGY (across all conditions)")
     print("-"*100)
-    strategy_avg = df.groupby('strategy').agg({
+    strategy_avg = df.groupby('base_strategy').agg({
         'total_return_pct': 'mean',
         'max_drawdown_pct': 'mean',
         'sharpe_ratio': 'mean',
@@ -326,7 +354,15 @@ def main():
     logger.info("="*100 + "\n")
 
     all_results = []
-    total_tests = len(args.periods) * len(args.timeframes) * len(args.strategies)
+    
+    # Calculate total tests including MA ratios
+    total_tests = 0
+    for s in args.strategies:
+        if s in ["trend_following", "auto"]:
+            total_tests += len(args.periods) * len(args.timeframes) * len(MA_RATIOS)
+        else:
+            total_tests += len(args.periods) * len(args.timeframes)
+            
     current_test = 0
 
     # Download data for all combinations
@@ -343,19 +379,37 @@ def main():
     for period_key in args.periods:
         for timeframe_key in args.timeframes:
             for strategy in args.strategies:
-                current_test += 1
-                logger.info(f"Progress: {current_test}/{total_tests}")
+                # For trend-following strategies, test different MA ratios
+                if strategy in ["trend_following", "auto"]:
+                    for ma_short, ma_long in MA_RATIOS:
+                        current_test += 1
+                        logger.info(f"Progress: {current_test}/{total_tests} (Strategy: {strategy}, MA: {ma_short}/{ma_long})")
+                        
+                        metrics = run_backtest(
+                            args.symbols,
+                            period_key,
+                            timeframe_key,
+                            strategy,
+                            args.initial_capital,
+                            ma_short,
+                            ma_long
+                        )
+                        if metrics:
+                            all_results.append(metrics)
+                else:
+                    current_test += 1
+                    logger.info(f"Progress: {current_test}/{total_tests} (Strategy: {strategy})")
 
-                metrics = run_backtest(
-                    args.symbols,
-                    period_key,
-                    timeframe_key,
-                    strategy,
-                    args.initial_capital
-                )
+                    metrics = run_backtest(
+                        args.symbols,
+                        period_key,
+                        timeframe_key,
+                        strategy,
+                        args.initial_capital
+                    )
 
-                if metrics:
-                    all_results.append(metrics)
+                    if metrics:
+                        all_results.append(metrics)
 
     logger.info(f"\nCompleted {len(all_results)} backtests successfully!")
 
