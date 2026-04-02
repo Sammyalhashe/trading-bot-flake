@@ -16,7 +16,7 @@ from decimal import Decimal
 from config import TradingConfig, ExecutorConfig
 
 # Import core business logic
-from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager
+from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager, send_telegram_message, TradeLog
 
 # Graceful shutdown
 shutdown_requested = False
@@ -36,6 +36,7 @@ exec_config.validate()
 
 # Initialize core components
 state_manager = StateManager(exec_config.state_file)
+trade_log = TradeLog(exec_config.state_file.with_suffix('.trades.db'))
 technical_analysis = TechnicalAnalysis(
     ma_short_window=config.ma_short_window,
     ma_long_window=config.ma_long_window
@@ -231,6 +232,38 @@ def log_performance_summary():
 def is_asset_blacklisted(asset):
     return asset.upper() in [a.upper() for a in ASSET_BLACKLIST]
 
+
+# --- Telegram Trade Notifications ---
+def _notify_buy(ex_id, asset, price, buy_size, regime, candidate):
+    rsi = candidate.get("rsi")
+    momentum = candidate.get("momentum")
+    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+    mom_str = f"{momentum:+.1f}%" if momentum is not None else "N/A"
+    msg = (
+        f"<b>BUY {asset}</b>\n"
+        f"Price: ${price:,.2f}\n"
+        f"Size: ${buy_size:,.2f}\n"
+        f"Regime: {regime}\n"
+        f"RSI: {rsi_str} | Momentum: {mom_str}\n"
+        f"Executor: {ex_id}"
+    )
+    send_telegram_message(msg)
+
+
+def _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl):
+    pnl_emoji = "\U0001f4b0" if pnl >= 0 else "\U0001f534"
+    msg = (
+        f"<b>SELL {asset}</b> {pnl_emoji}\n"
+        f"Exit: ${exit_price:,.2f}\n"
+        f"Entry: ${entry:,.2f}\n"
+        f"Amount: {sell_amount:.6f}\n"
+        f"PnL: ${pnl:+.2f}\n"
+        f"Reason: {reason}\n"
+        f"Executor: {ex_id}"
+    )
+    send_telegram_message(msg)
+
+
 # --- Strategy Logic (wrappers for backward compatibility) ---
 def analyze_trend(df):
     """Wrapper for backward compatibility"""
@@ -424,6 +457,13 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                             if not already_holds:
                                 current_positions += 1
                             logging.info(f"[{ex_id}] Buy {asset} confirmed on-chain at ${price:,.2f}")
+                            _notify_buy(ex_id, asset, price, buy_size, full_regime, candidate)
+                            trade_log.record_buy(
+                                timestamp=datetime.datetime.now().isoformat(),
+                                executor_id=ex_id, asset=asset, product_id=product_id,
+                                price=price, quantity=new_qty, usd_value=buy_size,
+                                market_regime=full_regime,
+                                rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
                         elif result.get("success") is False:
                             logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
                         else:
@@ -438,6 +478,13 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                     if not already_holds:
                                         current_positions += 1
                                     logging.info(f"[{ex_id}] Buy {asset} confirmed at ${filled_price:,.2f}")
+                                    _notify_buy(ex_id, asset, filled_price, buy_size, full_regime, candidate)
+                                    trade_log.record_buy(
+                                        timestamp=datetime.datetime.now().isoformat(),
+                                        executor_id=ex_id, asset=asset, product_id=product_id,
+                                        price=filled_price, quantity=new_qty_filled, usd_value=buy_size,
+                                        market_regime=full_regime,
+                                        rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
                                 else:
                                     logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
                             else:
@@ -446,6 +493,13 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                 available_usdc -= buy_size
                                 if not already_holds:
                                     current_positions += 1
+                                _notify_buy(ex_id, asset, price, buy_size, full_regime, candidate)
+                                trade_log.record_buy(
+                                    timestamp=datetime.datetime.now().isoformat(),
+                                    executor_id=ex_id, asset=asset, product_id=product_id,
+                                    price=price, quantity=new_qty, usd_value=buy_size,
+                                    market_regime=full_regime,
+                                    rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
@@ -550,6 +604,13 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                         is_win = pnl > 0
                         record_trade(is_win, pnl)
                         logging.info(f"[{ex_id}] 📊 PnL: ${pnl:+.2f} (entry=${entry:,.2f} -> exit=${exit_price:,.2f}, fees=${fee_cost:.2f})")
+                        _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl)
+                        trade_log.record_sell(
+                            timestamp=datetime.datetime.now().isoformat(),
+                            executor_id=ex_id, asset=asset, product_id=product_id,
+                            price=exit_price, quantity=sell_amount,
+                            entry_price=entry, pnl=pnl, fee=fee_cost,
+                            reason=reason, market_regime=full_regime, hwm=hwm)
                     if sell_ratio == 1.0:
                         clear_entry_price(ex_id, product_id)
                     else:
@@ -559,6 +620,72 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
 
     return ex_value
+
+PERIODIC_STATUS_INTERVAL = 4 * 3600  # 4 hours in seconds
+
+
+def _build_status_message(full_regime, data_provider, aggregate_value, state):
+    """Build a periodic status summary message."""
+    lines = [f"<b>Status Update</b>", f"Regime: {full_regime}"]
+
+    # Price + indicator info for each supported asset
+    for asset in ["BTC", "ETH"]:
+        product_id = get_data_product_id(asset)
+        try:
+            price_data = data_provider.get_product_details(product_id)
+            if not price_data:
+                continue
+            price = float(price_data['price'])
+            df = data_provider.get_market_data(product_id, LONG_WINDOW)
+            ma_s, ma_l = analyze_trend(df)
+            rsi = calculate_rsi(df) if df is not None else None
+            momentum = get_momentum_ranking(df) if df is not None else None
+
+            line = f"\n<b>{asset}</b>: ${price:,.0f}"
+            if ma_s and ma_l:
+                line += f" | MA{SHORT_WINDOW}: ${ma_s:,.0f} | MA{LONG_WINDOW}: ${ma_l:,.0f}"
+            if rsi is not None:
+                line += f" | RSI: {rsi:.0f}"
+            if momentum is not None:
+                line += f" | Mom: {momentum:+.1f}%"
+            lines.append(line)
+        except Exception:
+            pass
+
+    lines.append(f"\nPortfolio: ${aggregate_value:,.2f}")
+
+    # Open positions
+    entry_prices = state.get("entry_prices", {})
+    if entry_prices:
+        lines.append("\n<b>Open Positions:</b>")
+        for key, entry in entry_prices.items():
+            asset_sym = key.split(":")[-1].split("-")[0]
+            try:
+                pd_id = get_data_product_id(asset_sym)
+                pd_data = data_provider.get_product_details(pd_id)
+                if pd_data:
+                    cur_price = float(pd_data['price'])
+                    upnl = (cur_price - entry) / entry * 100
+                    lines.append(f"  {asset_sym}: entry=${entry:,.2f} now=${cur_price:,.2f} ({upnl:+.1f}%)")
+            except Exception:
+                lines.append(f"  {asset_sym}: entry=${entry:,.2f}")
+
+    return "\n".join(lines)
+
+
+def _maybe_send_periodic_status(full_regime, data_provider, aggregate_value):
+    """Send a Telegram status summary every 4 hours."""
+    state = load_state()
+    now = time.time()
+    last_ts = state.get("last_periodic_status_ts", 0)
+    if now - last_ts < PERIODIC_STATUS_INTERVAL:
+        return
+    msg = _build_status_message(full_regime, data_provider, aggregate_value, state)
+    if send_telegram_message(msg):
+        state["last_periodic_status_ts"] = now
+        save_state(state)
+        logging.info("Periodic status sent via Telegram")
+
 
 def run_bot(reset_to_usdc=False):
     if not acquire_run_lock():
@@ -751,6 +878,8 @@ def _run_bot(reset_to_usdc=False):
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
     logging.info(f"==================")
 
+    _maybe_send_periodic_status(full_regime, data_provider, aggregate_value)
+
 def run_ws_mode():
     """Run bot in WebSocket mode for real-time exit checks."""
     import asyncio
@@ -934,5 +1063,34 @@ if __name__ == "__main__":
         print(f"Gross Profit: ${perf.get('gross_profit', 0):+.2f} | Gross Loss: ${perf.get('gross_loss', 0):.2f}")
         print(f"Runs: {perf.get('run_count', 0)}")
         print(f"Last Run: {perf.get('last_run_time', 'N/A')}")
+    elif "--trades" in sys.argv:
+        # Parse optional filters from argv
+        def _get_arg(flag, default=None):
+            try:
+                idx = sys.argv.index(flag)
+                return sys.argv[idx + 1]
+            except (ValueError, IndexError):
+                return default
+
+        t_asset = _get_arg("--asset")
+        t_regime = _get_arg("--regime")
+        t_since = _get_arg("--since")
+        t_until = _get_arg("--until")
+        t_side = _get_arg("--side")
+        t_limit = int(_get_arg("--limit", "50"))
+
+        if "--summary" in sys.argv:
+            s = trade_log.summary(asset=t_asset, since=t_since)
+            print(f"=== Trade Summary ===")
+            print(f"Total Trades: {s['total_trades']}")
+            print(f"Wins: {s['wins']} | Losses: {s['losses']}")
+            print(f"Win Rate: {s['win_rate']:.1f}%")
+            print(f"Avg Win: ${s['avg_win']:+,.2f} | Avg Loss: ${s['avg_loss']:,.2f}")
+            print(f"Total PnL: ${s['total_pnl']:+,.2f}")
+        else:
+            rows = trade_log.query(
+                asset=t_asset, side=t_side, regime=t_regime,
+                since=t_since, until=t_until, limit=t_limit)
+            print(TradeLog.format_table(rows))
     else:
         run_bot(reset_to_usdc="--reset" in sys.argv)

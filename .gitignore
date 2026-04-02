@@ -19,3 +19,7 @@ trading_state.runlock
 market_state.json
 
 result/
+
+# Generated API docs (built in CI only)
+dashboard/api/
+!dashboard/api/.gitkeep

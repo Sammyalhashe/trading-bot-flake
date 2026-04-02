@@ -15,6 +15,13 @@ class TrendFollowingStrategy:
         self.config = config
         self.name = "trend_following"
 
+    def _log_skip(self, asset, reason, **indicators):
+        parts = [f"[{asset}] Skip: {reason}"]
+        if indicators:
+            detail = " | ".join(f"{k}={v}" for k, v in indicators.items())
+            parts.append(f"[{detail}]")
+        logger.info(" ".join(parts))
+
     def should_skip_regime(self, market_regime: str, full_regime: str) -> bool:
         return full_regime == "NEUTRAL"
 
@@ -30,16 +37,24 @@ class TrendFollowingStrategy:
                 if ma_s and ma_l and ma_s > ma_l * 1.002 and self.ta.is_crossover_confirmed(df, "bull"):
                     logger.info(f"BTC bear-market exemption triggered (hedging strategy)")
                     return self._standard_entry_checks(asset, product_id, df)
+            self._log_skip(asset, "BEAR regime, no scale or BTC exemption")
             return None
 
         # NEUTRAL: skip entries
         if full_regime == "NEUTRAL":
+            self._log_skip(asset, "NEUTRAL regime")
             return None
 
         # BULL: standard MA crossover entry
         if not (ma_s and ma_l and ma_s > ma_l * 1.002):
+            threshold = f"${ma_l * 1.002:,.0f}" if ma_l else "N/A"
+            self._log_skip(asset, "MA crossover not triggered",
+                           ma_s=f"${ma_s:,.0f}" if ma_s else "N/A",
+                           ma_l=f"${ma_l:,.0f}" if ma_l else "N/A",
+                           threshold=threshold)
             return None
         if not self.ta.is_crossover_confirmed(df, "bull"):
+            self._log_skip(asset, "MA crossover not confirmed (need 3 bars)")
             return None
 
         return self._standard_entry_checks(asset, product_id, df)
@@ -52,14 +67,21 @@ class TrendFollowingStrategy:
             close_price = df['close'].iloc[-1]
             usd_volume_24h = volume_24h * close_price
             if usd_volume_24h < min_volume:
+                self._log_skip(asset, "24h volume too low",
+                               volume=f"${usd_volume_24h:,.0f}",
+                               min=f"${min_volume:,.0f}")
                 return None
 
         rsi = self.ta.calculate_rsi(df)
         if rsi is not None and rsi > float(self.config.rsi_overbought):
+            self._log_skip(asset, "RSI overbought",
+                           rsi=f"{rsi:.1f}",
+                           limit=f"{float(self.config.rsi_overbought):.0f}")
             return None
 
         momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
-        return {"asset": asset, "product_id": product_id, "score": momentum}
+        return {"asset": asset, "product_id": product_id, "score": momentum,
+                "rsi": rsi, "momentum": momentum}
 
     def _bear_momentum_entry(self, asset: str, product_id: str, df) -> dict | None:
         """Entry signal for BEAR regime: momentum + RSI instead of MA crossover.
@@ -70,14 +92,22 @@ class TrendFollowingStrategy:
         """
         momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
         if momentum < 2.0:  # Require >2% 24h momentum to enter in BEAR
+            self._log_skip(asset, "BEAR momentum too low",
+                           momentum=f"{momentum:+.1f}%", required=">2.0%")
             return None
 
         rsi = self.ta.calculate_rsi(df)
         if rsi is None:
+            self._log_skip(asset, "RSI unavailable (BEAR momentum)")
             return None
         if rsi > float(self.config.rsi_overbought):
+            self._log_skip(asset, "RSI overbought (BEAR momentum)",
+                           rsi=f"{rsi:.1f}",
+                           limit=f"{float(self.config.rsi_overbought):.0f}")
             return None
         if rsi < 35:  # Skip deeply oversold — likely a dump, not a rally
+            self._log_skip(asset, "RSI deeply oversold (BEAR momentum)",
+                           rsi=f"{rsi:.1f}", floor="35")
             return None
 
         # Volume filter
@@ -87,10 +117,14 @@ class TrendFollowingStrategy:
             close_price = df['close'].iloc[-1]
             usd_volume_24h = volume_24h * close_price
             if usd_volume_24h < min_volume:
+                self._log_skip(asset, "24h volume too low (BEAR momentum)",
+                               volume=f"${usd_volume_24h:,.0f}",
+                               min=f"${min_volume:,.0f}")
                 return None
 
         logger.info(f"Bear momentum entry: {asset} momentum={momentum:+.1f}% RSI={rsi:.0f}")
-        return {"asset": asset, "product_id": product_id, "score": momentum}
+        return {"asset": asset, "product_id": product_id, "score": momentum,
+                "rsi": rsi, "momentum": momentum}
 
     def rank_candidates(self, candidates: list[dict]) -> list[dict]:
         return sorted(candidates, key=lambda x: x["score"], reverse=True)

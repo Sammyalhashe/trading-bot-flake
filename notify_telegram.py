@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 import os
 import json
-import requests
 import sys
 from datetime import datetime
+
+from core.telegram import send_telegram_message
 
 # --- Configuration ---
 _HOME = os.path.expanduser("~")
 REPORT_FILE = os.environ.get("TRADING_REPORT_FILE", os.path.join(_HOME, ".openclaw", "workspace", "trading-bot", "report.txt"))
-TELEGRAM_TOKEN_FILE = "/run/secrets/telegram_bot_token"
-CHAT_ID = "8555669756"
 # File to persist market regime change counters and recent transactions
 MARKET_STATE_FILE = os.environ.get("MARKET_STATE_FILE", os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.join(_HOME, ".local", "state")),
@@ -19,23 +18,6 @@ MARKET_STATE_FILE = os.environ.get("MARKET_STATE_FILE", os.path.join(
 # Emoji definitions
 REGIME_CHANGE_EMOJI = "🔄"  # blue arrow cycle for market flips
 ISSUE_EMOJI = "❗"        # exclamation for actual issues
-
-def send_telegram_message(message):
-    if not os.path.exists(TELEGRAM_TOKEN_FILE):
-        print(f"{ISSUE_EMOJI} Token file not found at {TELEGRAM_TOKEN_FILE}")
-        return
-
-    with open(TELEGRAM_TOKEN_FILE, 'r') as f:
-        token = f.read().strip()
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        print("Notification sent successfully.")
-    except Exception as e:
-        print(f"{ISSUE_EMOJI} Failed to send notification: {e}")
 
 def load_market_state():
     """Load persisted market state. Create defaults if missing."""

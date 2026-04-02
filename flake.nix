@@ -26,7 +26,7 @@
           name = "coinbase-trading-bot";
           src = ./.;
 
-          buildInputs = [ pkgs.makeWrapper ];
+          buildInputs = [ pkgs.makeWrapper pkgs.sqlite ];
 
           installPhase = ''
             mkdir -p $out/bin
@@ -126,6 +126,7 @@
           buildInputs = [
             pythonEnv
             pkgs.python3Packages.pip
+            pkgs.sqlite
             pkgs.sops
             pkgs.age
             (pkgs.writeShellScriptBin "load-trading-secrets" ''

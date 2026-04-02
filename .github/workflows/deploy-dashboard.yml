@@ -1,4 +1,4 @@
-name: Deploy Dashboard to GitHub Pages
+name: Deploy Dashboard & API Docs to GitHub Pages
 
 on:
   push:
@@ -6,6 +6,11 @@ on:
       - master
     paths:
       - 'dashboard/**'
+      - 'core/**'
+      - 'strategies/**'
+      - 'config/**'
+      - 'executors/**'
+      - 'trading_bot.py'
   workflow_dispatch:
 
 permissions:
@@ -26,15 +31,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
-      
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pdoc requests pandas pyjwt cryptography web3 websockets loguru
+
+      - name: Generate API docs
+        run: |
+          pdoc --output-dir dashboard/api \
+            core strategies config executors \
+            trading_bot.py notify_telegram.py
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: './dashboard'
-      
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
