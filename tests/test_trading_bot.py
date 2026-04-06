@@ -282,10 +282,10 @@ class TestTrendExitFlag:
 
         assert len(first_sell_calls) > 0, "Trend exit should trigger on first run"
         assert len(second_sell_calls) == 0, "Trend exit should NOT trigger on second run"
-            # Verify the flag is set
-            state = trading_bot.load_state()
-            tp_flags = state.get("take_profit_flags", {}).get("TestExecutor:BTC-USDC", {})
-            assert tp_flags.get("trend_exit_hit") is True
+        # Verify the flag is set
+        state = trading_bot.load_state()
+        tp_flags = state.get("take_profit_flags", {}).get("TestExecutor:BTC-USDC", {})
+        assert tp_flags.get("trend_exit_hit") is True
 
 
 # ===== Test Fee-Aware PnL =====

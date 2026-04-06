@@ -25,6 +25,16 @@ class TrendFollowingStrategy:
     def should_skip_regime(self, market_regime: str, full_regime: str) -> bool:
         return full_regime == "NEUTRAL"
 
+    def _get_rsi_limit(self, full_regime: str) -> float:
+        """Return regime-specific RSI overbought threshold."""
+        regime_map = {
+            "STRONG_BULL": float(self.config.rsi_overbought_strong_bull),
+            "BULL": float(self.config.rsi_overbought_bull),
+            "NEUTRAL": float(self.config.rsi_overbought_neutral),
+            "BEAR": float(self.config.rsi_overbought_bear),
+        }
+        return regime_map.get(full_regime, float(self.config.rsi_overbought))
+
     def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
         ma_s, ma_l = self.ta.analyze_trend(df)
 
@@ -36,7 +46,7 @@ class TrendFollowingStrategy:
                 # Legacy BTC exemption (requires MA crossover — rarely triggers)
                 if ma_s and ma_l and ma_s > ma_l * 1.002 and self.ta.is_crossover_confirmed(df, "bull"):
                     logger.info(f"BTC bear-market exemption triggered (hedging strategy)")
-                    return self._standard_entry_checks(asset, product_id, df)
+                    return self._standard_entry_checks(asset, product_id, df, full_regime)
             self._log_skip(asset, "BEAR regime, no scale or BTC exemption")
             return None
 
@@ -57,9 +67,9 @@ class TrendFollowingStrategy:
             self._log_skip(asset, "MA crossover not confirmed (need 3 bars)")
             return None
 
-        return self._standard_entry_checks(asset, product_id, df)
+        return self._standard_entry_checks(asset, product_id, df, full_regime)
 
-    def _standard_entry_checks(self, asset: str, product_id: str, df) -> dict | None:
+    def _standard_entry_checks(self, asset: str, product_id: str, df, full_regime: str = "BULL") -> dict | None:
         """Volume, RSI, and momentum checks shared by all entry paths."""
         min_volume = float(self.config.min_24h_volume_usd)
         if df is not None and len(df) >= 24:
@@ -73,10 +83,12 @@ class TrendFollowingStrategy:
                 return None
 
         rsi = self.ta.calculate_rsi(df)
-        if rsi is not None and rsi > float(self.config.rsi_overbought):
+        rsi_limit = self._get_rsi_limit(full_regime)
+        if rsi is not None and rsi > rsi_limit:
             self._log_skip(asset, "RSI overbought",
                            rsi=f"{rsi:.1f}",
-                           limit=f"{float(self.config.rsi_overbought):.0f}")
+                           limit=f"{rsi_limit:.0f}",
+                           regime=full_regime)
             return None
 
         momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
@@ -100,10 +112,11 @@ class TrendFollowingStrategy:
         if rsi is None:
             self._log_skip(asset, "RSI unavailable (BEAR momentum)")
             return None
-        if rsi > float(self.config.rsi_overbought):
+        rsi_limit = self._get_rsi_limit("BEAR")
+        if rsi > rsi_limit:
             self._log_skip(asset, "RSI overbought (BEAR momentum)",
                            rsi=f"{rsi:.1f}",
-                           limit=f"{float(self.config.rsi_overbought):.0f}")
+                           limit=f"{rsi_limit:.0f}")
             return None
         if rsi < 35:  # Skip deeply oversold — likely a dump, not a rally
             self._log_skip(asset, "RSI deeply oversold (BEAR momentum)",

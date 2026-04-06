@@ -419,7 +419,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             if hasattr(data_provider, 'get_market_data'):
                 df = data_provider.get_market_data(product_id, 20)
                 if df is not None:
-                    atr = ta.calculate_atr(df)
+                    atr = technical_analysis.calculate_atr(df)
 
             buy_size, size_msg = risk_manager.calculate_position_with_existing(
                 portfolio_value=ex_value,

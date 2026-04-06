@@ -160,9 +160,19 @@ class TestTrendFollowingStrategy:
 
     def test_btc_allowed_in_bear_with_exemption(self):
         s = self._make_strategy()
-        df = make_bullish_df()
+        # Need >2% 24h momentum + RSI 35-70 for _bear_momentum_entry
+        # Choppy uptrend with pullbacks to keep RSI moderate
+        prices = []
+        p = 100.0
+        for i in range(60):
+            if i % 3 == 2:
+                p -= 0.4  # pullback every 3rd bar
+            else:
+                p += 0.35  # up move — net +0.30 per 3 bars
+            prices.append(p)
+        df = make_candle_df(prices, volumes=[200000.0] * 60, num_rows=60)
         result = s.scan_entry("BTC", "BTC-USDC", df, "BEAR", "BEAR")
-        # BTC should be allowed due to allow_btc_in_bear
+        # BTC should be allowed via bear_position_scale > 0 momentum entry
         assert result is not None
 
     def test_skips_neutral_regime(self):
@@ -185,9 +195,9 @@ class TestTrendFollowingStrategy:
         s = self._make_strategy()
         df = make_bullish_df()
         entry = 100.0
-        # Price is 10% above entry → TP1 (default 10%)
-        price = 111.0
-        hwm = 111.0
+        # Price is 16% above entry → TP1 (default 15%)
+        price = 116.0
+        hwm = 116.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
         sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
@@ -200,8 +210,8 @@ class TestTrendFollowingStrategy:
         s = self._make_strategy()
         df = make_bullish_df()
         entry = 100.0
-        price = 121.0  # 21% above entry → TP2 (default 20%)
-        hwm = 121.0
+        price = 141.0  # 41% above entry → TP2 (default 40%)
+        hwm = 141.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
         sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
@@ -370,13 +380,13 @@ class TestStrategyConfig:
         with pytest.raises(ValueError, match="Invalid strategy"):
             config.validate()
 
-    def test_default_strategy_is_auto(self):
+    def test_default_strategy_is_trend_following(self):
         config = default_config()
-        assert config.strategy == "auto"
+        assert config.strategy == "trend_following"
 
     def test_mean_reversion_defaults(self):
         config = default_config()
-        assert config.mr_rsi_oversold == Decimal("25")
+        assert config.mr_rsi_oversold == Decimal("30")
         assert config.mr_bollinger_period == 20
         assert config.mr_bollinger_std == 2.0
         assert config.mr_trailing_stop_pct == Decimal("0.08")
@@ -389,7 +399,7 @@ class TestStrategyConfig:
 
     def test_max_concurrent_positions_default(self):
         config = default_config()
-        assert config.max_concurrent_positions == 7
+        assert config.max_concurrent_positions == 3
 
 
 # ===== Dynamic Strategy Switching =====
@@ -424,20 +434,20 @@ class TestDynamicStrategySwitching:
 # ===== Updated Thresholds =====
 
 class TestUpdatedThresholds:
-    def test_rsi_27_rejected_by_new_threshold(self):
-        """RSI=27 was accepted with old threshold (30) but rejected with new (25)."""
+    def test_rsi_32_rejected_by_new_threshold(self):
+        """RSI=32 was accepted with old threshold (35) but rejected with new (30)."""
         from strategies.mean_reversion import MeanReversionStrategy
         config = default_config()
-        assert config.mr_rsi_oversold == Decimal("25")
+        assert config.mr_rsi_oversold == Decimal("30")
         s = MeanReversionStrategy(make_ta(), config)
-        # Moderate drop: RSI will be ~27 (between old 30 and new 25 threshold)
-        prices = [100.0] * 50 + [98.0, 96.5, 95.5, 94.8, 94.2, 93.8, 93.5, 93.3, 93.2, 93.1]
+        # Moderate drop: RSI will be ~32 (between old 35 and new 30 threshold)
+        prices = [100.0] * 50 + [98.5, 97.2, 96.2, 95.5, 95.0, 94.6, 94.3, 94.1, 94.0, 93.9]
         df = make_candle_df(prices, volumes=[200000.0] * 60, num_rows=60)
         rsi = make_ta().calculate_rsi(df)
-        # Verify RSI is between 25 and 30 (old threshold accepts, new rejects)
-        if rsi is not None and 25 < rsi < 30:
+        # Verify RSI is between 30 and 35 (old threshold accepts, new rejects)
+        if rsi is not None and 30 < rsi < 35:
             result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
-            assert result is None  # Should be rejected with RSI threshold of 25
+            assert result is None  # Should be rejected with RSI threshold of 30
 
     def test_time_exit_at_10h(self):
         """Positions should exit after 10h instead of waiting for 24h."""

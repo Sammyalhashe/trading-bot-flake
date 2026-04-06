@@ -28,6 +28,10 @@ class TradingConfig:
 
     # Technical Indicators
     rsi_overbought: Decimal
+    rsi_overbought_bull: Decimal
+    rsi_overbought_strong_bull: Decimal
+    rsi_overbought_neutral: Decimal
+    rsi_overbought_bear: Decimal
     trailing_stop_pct: Decimal
     min_24h_volume_usd: Decimal
 
@@ -97,6 +101,10 @@ class TradingConfig:
 
             # Technical Indicators
             rsi_overbought=Decimal(os.getenv("RSI_OVERBOUGHT", "75")),
+            rsi_overbought_bull=Decimal(os.getenv("RSI_OVERBOUGHT_BULL", "82")),
+            rsi_overbought_strong_bull=Decimal(os.getenv("RSI_OVERBOUGHT_STRONG_BULL", "88")),
+            rsi_overbought_neutral=Decimal(os.getenv("RSI_OVERBOUGHT_NEUTRAL", "75")),
+            rsi_overbought_bear=Decimal(os.getenv("RSI_OVERBOUGHT_BEAR", "70")),
             trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.07")),
             min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
 
