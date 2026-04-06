@@ -237,8 +237,8 @@ class TestTrendFollowingStrategy:
         s = self._make_strategy()
         df = make_bearish_df()
         entry = 150.0
-        price = 150.0  # No gain/loss
-        hwm = 150.0
+        price = 151.0  # +0.67% gain, above fee floor (0.45%)
+        hwm = 151.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
         sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")

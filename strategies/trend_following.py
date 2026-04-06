@@ -194,12 +194,18 @@ class TrendFollowingStrategy:
                 reason = f"Trailing stop-loss triggered for {asset} (price ${price:,.2f} < stop ${stop_price:,.2f}, HWM=${hwm:,.2f}, ATR stop={effective_trailing_stop*100:.1f}%{be_note})"
 
         # Priority 4: Trend-exit (MA cross) — fires once per entry
+        # Only exit if gain exceeds 1.5× round-trip fees; otherwise let trailing stop handle it
         if not sell_trigger and not tp_flags.get("trend_exit_hit", False):
+            pnl_pct = (price - entry) / entry
+            fee_floor = float(self.config.round_trip_fee_pct) * 1.5
             ma_s, ma_l = self.ta.analyze_trend(df)
             if ma_s and ma_l and (ma_s < ma_l * 0.998 or current_price < ma_l * 0.99):
-                sell_trigger = True
-                sell_ratio = 0.5
-                reason = f"Trend-exit (50%) triggered for {asset}"
-                tp_flags["trend_exit_hit"] = True
+                if pnl_pct > fee_floor:
+                    sell_trigger = True
+                    sell_ratio = 0.5
+                    reason = f"Trend-exit (50%) triggered for {asset} (PnL {pnl_pct*100:+.2f}% > fee floor {fee_floor*100:.2f}%)"
+                    tp_flags["trend_exit_hit"] = True
+                else:
+                    logger.info(f"[{asset}] Trend-exit deferred: PnL {pnl_pct*100:+.2f}% below fee floor {fee_floor*100:.2f}%, deferring to trailing stop")
 
         return sell_trigger, sell_ratio, reason, tp_flags

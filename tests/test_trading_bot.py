@@ -244,10 +244,9 @@ class TestTrendExitFlag:
     def test_trend_exit_fires_once(self, temp_state_file, mock_executor, mock_data_provider):
         import trading_bot
 
-        # Setup: holding BTC with entry at current price (no gain/loss)
-        # so TP1/TP2 won't trigger. HWM = entry = price so trailing stop won't trigger.
+        # Setup: holding BTC with small gain (+0.67%) above fee floor (0.45%)
+        # so TP1/TP2 won't trigger. HWM = price so trailing stop won't trigger.
         # But MA cross is bearish so trend exit should fire.
-        # Disable short selling to avoid confusion with short sell orders
         current_price = 150.0
         mock_executor.get_balances.return_value = {
             "cash": {"USDC": 1000.0},
@@ -261,8 +260,9 @@ class TestTrendExitFlag:
             "base_increment": "0.001",
         }
 
-        # Entry = current price, so no TP triggers, and HWM = entry = price
-        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", current_price)
+        # Entry below current price for +0.67% gain, above fee floor
+        entry_price = 149.0
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", entry_price)
 
         # First run: trend exit should trigger
         trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
