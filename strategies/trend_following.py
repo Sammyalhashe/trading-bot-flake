@@ -35,6 +35,15 @@ class TrendFollowingStrategy:
         }
         return regime_map.get(full_regime, float(self.config.rsi_overbought))
 
+    def _has_volume_spike(self, df, lookback: int = 20) -> bool:
+        """Current candle volume >= threshold * 20-period average."""
+        if df is None or len(df) < lookback + 1 or 'volume' not in df.columns:
+            return False
+        avg_vol = df['volume'].iloc[-(lookback + 1):-1].mean()
+        if avg_vol <= 0:
+            return False
+        return df['volume'].iloc[-1] >= avg_vol * self.config.volume_spike_threshold
+
     def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
         ma_s, ma_l = self.ta.analyze_trend(df)
 
@@ -85,11 +94,22 @@ class TrendFollowingStrategy:
         rsi = self.ta.calculate_rsi(df)
         rsi_limit = self._get_rsi_limit(full_regime)
         if rsi is not None and rsi > rsi_limit:
-            self._log_skip(asset, "RSI overbought",
-                           rsi=f"{rsi:.1f}",
-                           limit=f"{rsi_limit:.0f}",
-                           regime=full_regime)
-            return None
+            bonus = self.config.volume_spike_rsi_bonus
+            if bonus > 0 and self._has_volume_spike(df):
+                relaxed_limit = rsi_limit + bonus
+                if rsi <= relaxed_limit:
+                    logger.info(f"[{asset}] RSI {rsi:.1f} > {rsi_limit:.0f} but volume spike "
+                                f"allows up to {relaxed_limit:.0f}")
+                else:
+                    self._log_skip(asset, "RSI overbought (even with volume spike)",
+                                   rsi=f"{rsi:.1f}", limit=f"{relaxed_limit:.0f}",
+                                   regime=full_regime)
+                    return None
+            else:
+                self._log_skip(asset, "RSI overbought",
+                               rsi=f"{rsi:.1f}", limit=f"{rsi_limit:.0f}",
+                               regime=full_regime)
+                return None
 
         momentum = self.ta.get_momentum_ranking(df, self.config.momentum_window_hours)
         return {"asset": asset, "product_id": product_id, "score": momentum,

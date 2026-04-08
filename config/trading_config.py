@@ -34,6 +34,8 @@ class TradingConfig:
     rsi_overbought_bear: Decimal
     trailing_stop_pct: Decimal
     min_24h_volume_usd: Decimal
+    volume_spike_rsi_bonus: float
+    volume_spike_threshold: float
 
     # Fee Configuration
     round_trip_fee_pct: Decimal
@@ -107,6 +109,8 @@ class TradingConfig:
             rsi_overbought_bear=Decimal(os.getenv("RSI_OVERBOUGHT_BEAR", "70")),
             trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.07")),
             min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
+            volume_spike_rsi_bonus=float(os.getenv("VOLUME_SPIKE_RSI_BONUS", "5")),
+            volume_spike_threshold=float(os.getenv("VOLUME_SPIKE_THRESHOLD", "2.0")),
 
             # Fee Configuration — Coinbase Advanced 3 tier (Coinbase One):
             # Maker 0.075% / Taker 0.150% per side → 0.30% round-trip (taker)
