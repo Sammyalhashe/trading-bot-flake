@@ -210,6 +210,48 @@ class CoinbaseExecutor:
         logging.warning(f"Order {order_id} not filled after {max_attempts} attempts")
         return None
 
+    def place_aggressive_limit_order(self, product_id, side, price, amount_base_currency):
+        """Limit order without post_only — crosses the spread for immediate fill
+        but still provides price protection unlike a raw market order.
+        Used for stop-losses where speed matters but we want a price ceiling/floor."""
+        if self.trading_mode == "live":
+            self.cancel_open_orders(product_id)
+
+        details = self.get_product_details(product_id)
+        if not details:
+            return None
+
+        best_bid, best_ask = self.get_best_bid_ask(product_id)
+        tick = float(details['quote_increment'])
+
+        # Price aggressively to ensure fill: sell at/below bid, buy at/above ask
+        if side == 'SELL':
+            price = min(price, best_bid - tick) if best_bid else price
+        else:
+            price = max(price, best_ask + tick) if best_ask else price
+
+        order_id = str(uuid.uuid4())
+        rounded_base = self._round_to_increment(amount_base_currency, details['base_increment'])
+        rounded_price = self._round_to_increment(price, details['quote_increment'])
+
+        payload = {
+            "client_order_id": order_id,
+            "product_id": product_id,
+            "side": side,
+            "order_configuration": {
+                "limit_limit_gtc": {
+                    "base_size": str(rounded_base),
+                    "limit_price": str(rounded_price),
+                    "post_only": False
+                }
+            }
+        }
+
+        logging.info(f"Placing AGGRESSIVE LIMIT {side} for {product_id} at {rounded_price} size={rounded_base}")
+        if self.trading_mode == "live":
+            return self.request("POST", "/api/v3/brokerage/orders", payload)
+        return {"success": True, "order_id": order_id}
+
     def place_market_order(self, product_id, side, amount_quote_currency=None, amount_base_currency=None):
         if self.trading_mode == "live":
             self.cancel_open_orders(product_id)

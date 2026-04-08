@@ -112,9 +112,10 @@ class TradingConfig:
             volume_spike_rsi_bonus=float(os.getenv("VOLUME_SPIKE_RSI_BONUS", "5")),
             volume_spike_threshold=float(os.getenv("VOLUME_SPIKE_THRESHOLD", "2.0")),
 
-            # Fee Configuration — Coinbase Advanced 3 tier (Coinbase One):
-            # Maker 0.075% / Taker 0.150% per side → 0.30% round-trip (taker)
-            round_trip_fee_pct=Decimal(os.getenv("ROUND_TRIP_FEE_PCT", "0.003")),
+            # Fee Configuration — Coinbase Advanced Level 3 (w/ Coinbase One):
+            # Maker 0.075% / Taker 0.150% per side.
+            # Default assumes maker fees (post_only limit orders): 0.075% × 2 = 0.15%
+            round_trip_fee_pct=Decimal(os.getenv("ROUND_TRIP_FEE_PCT", "0.0015")),
 
             # Take Profit Levels — wide targets, small sells, let trailing stop
             # do the heavy lifting. TP1 locks in some profit, TP2 is for big moves.

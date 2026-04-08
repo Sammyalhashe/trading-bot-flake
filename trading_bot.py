@@ -555,10 +555,14 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 logging.info(f"[{ex_id}] 🚨 {reason}")
                 sell_amount = amt * sell_ratio
                 is_stop_loss = "stop" in reason.lower()
-                result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+                if is_stop_loss and hasattr(executor, 'place_aggressive_limit_order'):
+                    # Stop-losses use aggressive limit (no post_only) for immediate fill with price protection
+                    result = executor.place_aggressive_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+                else:
+                    result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
                 # Fallback to market order for stop losses if limit fails
                 if not result and is_stop_loss:
-                    logging.warning(f"[{ex_id}] Limit sell failed for stop loss on {asset}, falling back to market order")
+                    logging.warning(f"[{ex_id}] Aggressive limit sell failed for stop loss on {asset}, falling back to market order")
                     result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
                 if result:
                     # Handle dust_skip — position is effectively gone, clean up state
@@ -570,9 +574,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     # Confirm fill and get actual exit price
                     exit_price = price  # default to requested price
                     if isinstance(result, dict) and result.get("success") is False:
-                        # Also try market order fallback for stop losses
+                        # Last resort: market order fallback for stop losses
                         if is_stop_loss:
-                            logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Falling back to market order.")
+                            logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Last-resort market order.")
                             result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
                             if not result or (isinstance(result, dict) and result.get("success") is False):
                                 logging.error(f"[{ex_id}] Market order fallback also failed for {asset}")
