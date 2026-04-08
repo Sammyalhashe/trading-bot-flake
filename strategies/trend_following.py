@@ -96,6 +96,9 @@ class TrendFollowingStrategy:
                 "rsi": rsi, "momentum": momentum}
 
     def _bear_momentum_entry(self, asset: str, product_id: str, df) -> dict | None:
+
+
+
         """Entry signal for BEAR regime: momentum + RSI instead of MA crossover.
 
         Uses short-term momentum (>2% in 24h) and RSI not overbought as entry
