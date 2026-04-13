@@ -398,6 +398,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     asset_candidates = strategy.rank_candidates(asset_candidates)
 
+
+    # sort by assets already held so we can potentially top-up held positions and not
+    # add to the max concurrency count.
+    asset_candidates = sorted(asset_candidates[:TOP_MOMENTUM_COUNT], key=lambda x : held_total.get(x["asset"], 0) > 0, reverse=True)
+
     # Concurrent position guard: count non-stablecoin holdings for this executor
     current_positions = sum(1 for a in held_total if a not in ("USD", "USDC") and held_total[a] > 0)
     max_positions = config.max_concurrent_positions
