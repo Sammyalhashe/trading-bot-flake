@@ -329,7 +329,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     if "available" in bal and "total" in bal:
         cash_avail = bal["available"]["cash"].get("USDC", 0.0)
         held_avail = bal["available"]["crypto"]
-        cash_total = bal["total"]["cash"].get("USDC", 0.0)
+        cash_total = bal["total"]["cash"].get("USDC", 0.0) + bal["total"]["cash"].get("USD", 0.0)
         held_total = bal["total"]["crypto"]
     else:
         # Fallback for other executors (legacy simple dict)
@@ -366,6 +366,16 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             logging.warning(f"[{ex_id}] Could not price {asset} (product_id={get_data_product_id(asset)}), excluding from portfolio value")
 
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
+
+    # Guard against API failures reporting $0 portfolio (false 100% drawdown).
+    # If ex_value is near-zero but we expect holdings, skip drawdown check.
+    peak = risk_manager._get_peak_value(ex_id)
+    if peak > 0 and ex_value < peak * 0.10:
+        logging.error(
+            f"[{ex_id}] Portfolio value ${ex_value:,.2f} is <10% of peak ${peak:,.2f} — "
+            f"likely API failure, skipping drawdown check this cycle"
+        )
+        return ex_value
 
     # Update peak value and check drawdown (per-executor)
     trading_allowed, dd_reason = risk_manager.check_circuit_breakers(ex_value, ex_id)
