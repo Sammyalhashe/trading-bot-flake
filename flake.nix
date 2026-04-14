@@ -88,6 +88,12 @@
             wrapProgram $out/bin/backtesting/download_historical_data.py \
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
               --set PYTHONPATH $out/bin
+
+            chmod +x $out/bin/backtesting/collect_derivatives_data.py
+            ln -s $out/bin/backtesting/collect_derivatives_data.py $out/bin/collect-derivatives
+            wrapProgram $out/bin/backtesting/collect_derivatives_data.py \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
           '';
         };
 
@@ -119,6 +125,10 @@
           download-data = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/download-data";
+          };
+          collect-derivatives = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/collect-derivatives";
           };
         };
 

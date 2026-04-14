@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Ongoing collector: appends latest OKX derivatives data to local CSVs.
-Designed to run hourly (e.g., via systemd timer or cron).
+Daily collector: appends the last ~48h of OKX derivatives data to local CSVs.
+Designed to run once per day via a systemd timer.
 
-Appends only new rows (deduplicates by timestamp), so it's safe to run frequently.
+Fetches enough history to cover a missed day (48h window) and deduplicates
+on timestamp, so running it more often or after a missed day is always safe.
 
 Usage:
     python backtesting/collect_derivatives_data.py
-
-Add to server as a systemd timer or cron:
-    */60 * * * * /path/to/venv/bin/python /path/to/backtesting/collect_derivatives_data.py
 """
 import sys
 import subprocess
 import json
 import csv
-import io
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,9 +50,10 @@ def get_last_timestamp(csv_path: Path) -> str | None:
 
 
 def append_funding_rates(output_path: Path) -> int:
-    """Fetch latest funding rates and append any new ones."""
+    """Fetch last 48h of funding rates (6 settlements) and append any new ones."""
     last_ts = get_last_timestamp(output_path)
 
+    # 3 settlements/day × 2 days = 6; fetch 10 for headroom
     data = okx_get("/public/funding-rate-history", {"instId": "BTC-USD-SWAP", "limit": "10"})
     entries = data.get("data", [])
     if not entries:
@@ -80,10 +77,11 @@ def append_funding_rates(output_path: Path) -> int:
 
 
 def append_open_interest(output_path: Path) -> int:
-    """Fetch latest OI and append any new rows."""
+    """Fetch last 48h of OI (48 hourly rows) and append any new ones."""
     last_ts = get_last_timestamp(output_path)
 
-    data = okx_get("/rubik/stat/contracts/open-interest-volume", {"ccy": "BTC", "period": "1H"})
+    # 24 rows/day × 2 days = 48; fetch 50 for headroom
+    data = okx_get("/rubik/stat/contracts/open-interest-volume", {"ccy": "BTC", "period": "1H", "limit": "50"})
     entries = data.get("data", [])
     if not entries:
         return 0
@@ -106,10 +104,11 @@ def append_open_interest(output_path: Path) -> int:
 
 
 def append_long_short_ratio(output_path: Path) -> int:
-    """Fetch latest L/S ratio and append any new rows."""
+    """Fetch last 48h of L/S ratio (48 hourly rows) and append any new ones."""
     last_ts = get_last_timestamp(output_path)
 
-    data = okx_get("/rubik/stat/contracts/long-short-account-ratio", {"ccy": "BTC", "period": "1H"})
+    # 24 rows/day × 2 days = 48; fetch 50 for headroom
+    data = okx_get("/rubik/stat/contracts/long-short-account-ratio", {"ccy": "BTC", "period": "1H", "limit": "50"})
     entries = data.get("data", [])
     if not entries:
         return 0
