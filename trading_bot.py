@@ -16,7 +16,7 @@ from decimal import Decimal
 from config import TradingConfig, ExecutorConfig
 
 # Import core business logic
-from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager, send_telegram_message, TradeLog
+from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager, send_telegram_message, TradeLog, DerivativesDataProvider
 
 # Graceful shutdown
 shutdown_requested = False
@@ -48,6 +48,7 @@ regime_detector = RegimeDetector(
     enable_btc_dominance=config.enable_btc_dominance
 )
 risk_manager = RiskManager(config, initial_capital=10000, state_manager=state_manager)
+derivatives_provider = DerivativesDataProvider(config) if config.enable_derivatives_signals else None
 
 # --- Logging Configuration ---
 from core.logging_config import setup_logging
@@ -58,6 +59,7 @@ logging.info(f"Using {config.trend_asset} for market regime detection")
 logging.info(f"BTC bear-market exemption: {'ENABLED' if config.allow_btc_in_bear else 'DISABLED'}")
 logging.info(f"Dual-signal regime detection: {'ENABLED' if config.enable_dual_regime else 'DISABLED'}")
 logging.info(f"Bitcoin dominance tracking: {'ENABLED' if config.enable_btc_dominance else 'DISABLED'}")
+logging.info(f"Derivatives signals (OKX): {'ENABLED' if config.enable_derivatives_signals else 'DISABLED'}")
 logging.info(f"Trading mode: {exec_config.trading_mode}")
 
 # Import strategy system
@@ -301,7 +303,7 @@ def is_crossover_confirmed(df, direction="bull"):
     """Wrapper for backward compatibility"""
     return technical_analysis.is_crossover_confirmed(df, direction)
 
-def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False):
+def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False, derivatives_signals=None):
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
@@ -408,6 +410,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     asset_candidates = strategy.rank_candidates(asset_candidates)
 
+    # Derivatives: skip entries on OI bearish divergence
+    if derivatives_signals and not derivatives_signals.entry_allowed:
+        if asset_candidates:
+            logging.info(f"[{ex_id}] Derivatives: OI divergence — skipping {len(asset_candidates)} entry candidates")
+            asset_candidates = []
 
     # sort by assets already held so we can potentially top-up held positions and not
     # add to the max concurrency count.
@@ -451,6 +458,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 buy_size *= config.bear_position_scale
                 if buy_size >= float(config.min_order_usd):
                     logging.info(f"[{ex_id}] Bear scaling: {asset} position reduced to {config.bear_position_scale:.0%}")
+            # Derivatives position modifier (funding rate + L/S ratio)
+            if derivatives_signals and derivatives_signals.position_modifier != 1.0:
+                deriv_mod = derivatives_signals.position_modifier
+                buy_size *= deriv_mod
+                logging.info(f"[{ex_id}] Derivatives modifier: {asset} position scaled by {deriv_mod:.2f}x")
             if buy_size < float(config.min_order_usd):
                 if size_msg != "Normal position sizing":
                     logging.info(f"[{ex_id}] Skipping {asset}: {size_msg}")
@@ -643,9 +655,15 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 PERIODIC_STATUS_INTERVAL = 4 * 3600  # 4 hours in seconds
 
 
-def _build_status_message(full_regime, data_provider, aggregate_value, state):
+def _build_status_message(full_regime, data_provider, aggregate_value, state, derivatives_signals=None):
     """Build a periodic status summary message."""
     lines = [f"<b>Status Update</b>", f"Regime: {full_regime}"]
+
+    if derivatives_signals and derivatives_signals.funding:
+        f = derivatives_signals.funding
+        lines.append(f"Funding: {f.avg_rate*100:.4f}% ({f.signal}) | Pos modifier: {derivatives_signals.position_modifier:.2f}x")
+        for flag in derivatives_signals.caution_flags:
+            lines.append(f"  * {flag}")
 
     # Price + indicator info for each supported asset
     for asset in ["BTC", "ETH"]:
@@ -692,14 +710,14 @@ def _build_status_message(full_regime, data_provider, aggregate_value, state):
     return "\n".join(lines)
 
 
-def _maybe_send_periodic_status(full_regime, data_provider, aggregate_value):
+def _maybe_send_periodic_status(full_regime, data_provider, aggregate_value, derivatives_signals=None):
     """Send a Telegram status summary every 4 hours."""
     state = load_state()
     now = time.time()
     last_ts = state.get("last_periodic_status_ts", 0)
     if now - last_ts < PERIODIC_STATUS_INTERVAL:
         return
-    msg = _build_status_message(full_regime, data_provider, aggregate_value, state)
+    msg = _build_status_message(full_regime, data_provider, aggregate_value, state, derivatives_signals=derivatives_signals)
     if send_telegram_message(msg):
         state["last_periodic_status_ts"] = now
         save_state(state)
@@ -875,10 +893,28 @@ def _run_bot(reset_to_usdc=False):
         else:
             logging.info(f"Strategy: {strategy.name} (regime: {full_regime})")
 
+    # Fetch derivatives signals once per cycle (cached, so cheap)
+    deriv_signals = None
+    if derivatives_provider:
+        try:
+            btc_price_change = None
+            btc_df = data_provider.get_market_data(get_data_product_id("BTC"), 25)
+            if btc_df is not None and len(btc_df) >= 24:
+                btc_price_change = ((btc_df['close'].iloc[-1] / btc_df['close'].iloc[-24]) - 1) * 100
+            deriv_signals = derivatives_provider.get_derivatives_signals(btc_price_change)
+            funding_str = f"{deriv_signals.funding.signal}({deriv_signals.funding.avg_rate*100:.4f}%)" if deriv_signals.funding else "N/A"
+            oi_str = f"{deriv_signals.oi.signal}({deriv_signals.oi.change_pct:+.1f}%)" if deriv_signals.oi else "N/A"
+            ls_str = f"{deriv_signals.ls_ratio.signal}({deriv_signals.ls_ratio.long_ratio:.0%})" if deriv_signals.ls_ratio else "N/A"
+            logging.info(f"Derivatives: funding={funding_str} | OI={oi_str} | L/S={ls_str} | modifier={deriv_signals.position_modifier:.2f}x")
+            for flag in deriv_signals.caution_flags:
+                logging.warning(f"Derivatives: {flag}")
+        except Exception as e:
+            logging.warning(f"Derivatives data fetch failed: {e}")
+
     aggregate_value = 0
     for ex in active_executors:
         try:
-            aggregate_value += run_executor_strategy(ex, data_provider, market_regime, full_regime, reset_to_usdc)
+            aggregate_value += run_executor_strategy(ex, data_provider, market_regime, full_regime, reset_to_usdc, derivatives_signals=deriv_signals)
         except Exception as e:
             logging.error(f"Strategy failed for {ex.__class__.__name__}: {e}")
 
@@ -897,7 +933,7 @@ def _run_bot(reset_to_usdc=False):
     logging.info(f"Take-Profit: TP1={TAKE_PROFIT_1_PCT*100:.0f}%/{TAKE_PROFIT_1_SELL_RATIO*100:.0f}% | TP2={TAKE_PROFIT_2_PCT*100:.0f}%/{TAKE_PROFIT_2_SELL_RATIO*100:.0f}%")
     logging.info(f"==================")
 
-    _maybe_send_periodic_status(full_regime, data_provider, aggregate_value)
+    _maybe_send_periodic_status(full_regime, data_provider, aggregate_value, derivatives_signals=deriv_signals)
 
 def run_ws_mode():
     """Run bot in WebSocket mode for real-time exit checks."""

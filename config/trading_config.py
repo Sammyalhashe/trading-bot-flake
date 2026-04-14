@@ -26,6 +26,12 @@ class TradingConfig:
     allow_btc_in_bear: bool
     bear_position_scale: float
 
+    # Derivatives Signals (OKX funding rates, OI, long/short ratio)
+    enable_derivatives_signals: bool
+    derivatives_funding_high: float
+    derivatives_funding_extreme: float
+    derivatives_oi_divergence_pct: float
+
     # Technical Indicators
     rsi_overbought: Decimal
     rsi_overbought_bull: Decimal
@@ -100,6 +106,13 @@ class TradingConfig:
             # Bear position scaling: 0.0 = no trades in BEAR (old behavior),
             # 0.25 = 25% position size, 1.0 = full size. Backtested best at 0.25.
             bear_position_scale=float(os.getenv("BEAR_POSITION_SCALE", "0.25")),
+
+            # Derivatives Signals — OKX perpetual futures data (funding rates, OI, L/S ratio).
+            # Opt-in: modifies position sizing and filters entries based on leveraged positioning.
+            enable_derivatives_signals=os.getenv("ENABLE_DERIVATIVES_SIGNALS", "false").lower() == "true",
+            derivatives_funding_high=float(os.getenv("DERIVATIVES_FUNDING_HIGH", "0.0005")),
+            derivatives_funding_extreme=float(os.getenv("DERIVATIVES_FUNDING_EXTREME", "0.0010")),
+            derivatives_oi_divergence_pct=float(os.getenv("DERIVATIVES_OI_DIVERGENCE_PCT", "-5.0")),
 
             # Technical Indicators
             rsi_overbought=Decimal(os.getenv("RSI_OVERBOUGHT", "75")),

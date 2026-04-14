@@ -6,5 +6,6 @@ from .ws_client import CoinbaseWSClient
 from .risk_manager import RiskManager
 from .telegram import send_telegram_message
 from .trade_log import TradeLog
+from .derivatives_data import DerivativesDataProvider
 
-__all__ = ['StateManager', 'TechnicalAnalysis', 'RegimeDetector', 'CoinbaseWSClient', 'RiskManager', 'send_telegram_message', 'TradeLog']
+__all__ = ['StateManager', 'TechnicalAnalysis', 'RegimeDetector', 'CoinbaseWSClient', 'RiskManager', 'send_telegram_message', 'TradeLog', 'DerivativesDataProvider']
