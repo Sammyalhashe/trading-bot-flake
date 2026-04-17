@@ -371,10 +371,11 @@ class TestCheckOrderFilled:
                     "status": "FILLED",
                     "average_filled_price": "50000.00",
                     "filled_size": "0.1",
+                    "total_fees": "1.25",
                 }
             })
             result = executor.check_order_filled("order-123")
-            assert result == 50000.0
+            assert result == {"price": 50000.0, "fee": 1.25}
 
     def test_cancelled_order_returns_none(self):
         from executors.coinbase_executor import CoinbaseExecutor

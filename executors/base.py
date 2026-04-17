@@ -95,9 +95,9 @@ class TradingExecutor(Protocol):
         """
         ...
 
-    def check_order_filled(self, order_id: str) -> Decimal | None:
+    def check_order_filled(self, order_id: str) -> dict | None:
         """
-        Check if order filled, return fill price or None.
+        Check if order filled. Returns {'price': float, 'fee': float} or None.
 
         Args:
             order_id: Order identifier

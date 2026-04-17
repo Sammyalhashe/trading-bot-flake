@@ -497,8 +497,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                             # Coinbase path: check order_id for fill confirmation
                             order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
                             if order_id and hasattr(executor, 'check_order_filled'):
-                                filled_price = executor.check_order_filled(order_id)
-                                if filled_price:
+                                fill_info = executor.check_order_filled(order_id)
+                                if fill_info:
+                                    filled_price = fill_info["price"]
                                     new_qty_filled = buy_size / filled_price
                                     update_entry_price(ex_id, product_id, filled_price, existing_qty, new_qty_filled)
                                     available_usdc -= buy_size
@@ -598,8 +599,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                         clear_entry_price(ex_id, product_id)
                         state = load_state()
                         continue
-                    # Confirm fill and get actual exit price
+                    # Confirm fill and get actual exit price + fee
                     exit_price = price  # default to requested price
+                    actual_sell_fee = None  # set by check_order_filled if available
                     if isinstance(result, dict) and result.get("success") is False:
                         # Last resort: market order fallback for stop losses
                         if is_stop_loss:
@@ -616,21 +618,25 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     elif isinstance(result, dict):
                         order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
                         if order_id and hasattr(executor, 'check_order_filled'):
-                            filled_price = executor.check_order_filled(order_id)
-                            if filled_price:
-                                exit_price = filled_price
-                                logging.info(f"[{ex_id}] Sell {asset} confirmed at ${filled_price:,.2f}")
+                            fill_info = executor.check_order_filled(order_id)
+                            if fill_info:
+                                exit_price = fill_info["price"]
+                                actual_sell_fee = fill_info["fee"]
+                                logging.info(f"[{ex_id}] Sell {asset} confirmed at ${exit_price:,.2f}")
                             else:
                                 logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
 
                     logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
                     # Track PnL (fee-aware)
-                    # PnL = (exit - entry) * qty - fees
-                    # Fee estimate: entry_price * qty * round_trip_fee_pct
-                    # This accounts for both the buy and sell side fees (~0.3% each
-                    # on Uniswap V3 0.3% pools, totaling ~0.6% round-trip).
+                    # Uses actual fees from Coinbase API when available,
+                    # falls back to estimated round-trip fee for on-chain/paper trades.
                     if entry:
-                        fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
+                        if actual_sell_fee is not None:
+                            # Actual sell fee from API; estimate buy-side fee (not tracked at buy time)
+                            buy_fee_est = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=False)
+                            fee_cost = buy_fee_est + actual_sell_fee
+                        else:
+                            fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
                         pnl = (exit_price - entry) * sell_amount - fee_cost
                         is_win = pnl > 0
                         record_trade(is_win, pnl)

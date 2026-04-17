@@ -66,5 +66,23 @@ def setup_logging(log_file: str | Path, level: str = "INFO") -> None:
         retention="10 days",  # Delete after 10 days
     )
 
+    # Trades-only file — buy/sell executions, PnL, and exit triggers
+    _TRADE_MARKERS = ("Buy ", "✅ Sold", "📊 PnL:", "🚨")
+
+    def _trade_filter(record):
+        msg = record["message"]
+        return any(m in msg for m in _TRADE_MARKERS)
+
+    trades_path = log_path.with_name("trades.log")
+    logger.add(
+        str(trades_path),
+        level=level,
+        format="{time:YYYY-MM-DD HH:mm:ss} - {level} - {message}",
+        filter=_trade_filter,
+        rotation="00:00",
+        compression="gz",
+        retention="10 days",
+    )
+
     # Intercept all stdlib logging and route through loguru
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)

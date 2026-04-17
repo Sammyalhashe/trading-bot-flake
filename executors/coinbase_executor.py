@@ -187,7 +187,10 @@ class CoinbaseExecutor:
         return {"success": True, "order_id": order_id}
 
     def check_order_filled(self, order_id, max_attempts=5, poll_interval=2):
-        """Poll order status until filled or timeout. Returns filled price or None."""
+        """Poll order status until filled or timeout.
+
+        Returns a dict with 'price' and 'fee' on success, or None on failure.
+        """
         for attempt in range(max_attempts):
             data = self.request("GET", f"/api/v3/brokerage/orders/historical/{order_id}")
             if not data or "order" not in data:
@@ -199,8 +202,9 @@ class CoinbaseExecutor:
             if status == "FILLED":
                 avg_price = float(order.get("average_filled_price", 0))
                 filled_size = float(order.get("filled_size", 0))
-                logging.info(f"Order {order_id} FILLED: {filled_size} @ ${avg_price:,.2f}")
-                return avg_price
+                total_fees = float(order.get("total_fees", 0))
+                logging.info(f"Order {order_id} FILLED: {filled_size} @ ${avg_price:,.2f} (fee: ${total_fees:.2f})")
+                return {"price": avg_price, "fee": total_fees}
             elif status in ("CANCELLED", "EXPIRED", "FAILED"):
                 logging.warning(f"Order {order_id} terminal status: {status}")
                 return None
