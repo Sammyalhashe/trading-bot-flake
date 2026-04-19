@@ -70,6 +70,12 @@ class TradingConfig:
     # Concentration Guard
     max_concurrent_positions: int
 
+    # Perpetual Futures
+    enable_perps: bool
+    perps_portfolio_uuid: str
+    perps_leverage: float
+    perps_round_trip_fee_pct: Decimal
+
     # WebSocket Mode
     ws_scan_interval: int
 
@@ -151,6 +157,13 @@ class TradingConfig:
             mr_trailing_stop_pct=Decimal(os.getenv("MR_TRAILING_STOP_PCT", "0.08")),
             mr_time_exit_candles=int(os.getenv("MR_TIME_EXIT_CANDLES", "10")),
 
+            # Perpetual Futures — Coinbase INTX perps (0.00% maker / 0.03% taker).
+            # Opt-in: runs as a separate executor alongside spot.
+            enable_perps=os.getenv("ENABLE_PERPS", "false").lower() == "true",
+            perps_portfolio_uuid=os.getenv("PERPS_PORTFOLIO_UUID", ""),
+            perps_leverage=float(os.getenv("PERPS_LEVERAGE", "1.0")),
+            perps_round_trip_fee_pct=Decimal(os.getenv("PERPS_ROUND_TRIP_FEE_PCT", "0.0006")),
+
             # Concentration Guard
             max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
 
@@ -213,6 +226,13 @@ class TradingConfig:
 
         if not (0 < self.take_profit_2_sell_ratio <= 1):
             errors.append(f"Take profit 2 sell ratio ({self.take_profit_2_sell_ratio}) must be between 0 and 1")
+
+        # Perps validation
+        if self.enable_perps:
+            if not self.perps_portfolio_uuid:
+                errors.append("PERPS_PORTFOLIO_UUID required when ENABLE_PERPS=true")
+            if self.perps_leverage != 1.0:
+                errors.append(f"PERPS_LEVERAGE must be 1.0 (got {self.perps_leverage}). Leverage >1x not yet supported")
 
         # Raise errors if any
         if errors:

@@ -88,7 +88,7 @@ else:
     logging.info(f"Strategy: {strategy.name} (fixed)")
 
 # Import specialized executors (after config loaded)
-from executors import CoinbaseExecutor, EthereumExecutor, validate_executor
+from executors import CoinbaseExecutor, CoinbasePerpsExecutor, EthereumExecutor, validate_executor
 
 # Backward compatibility: expose config values as module-level constants
 # TODO: Remove these after refactoring is complete
@@ -768,6 +768,14 @@ def _run_bot(reset_to_usdc=False):
                 eth_executor = EthereumExecutor(rpc_url, private_key, TRADING_MODE)
                 active_executors.append(eth_executor)
             except Exception as e: logging.error(f"Failed to init EthereumExecutor: {e}")
+
+    if config.enable_perps and config.perps_portfolio_uuid:
+        try:
+            perps_executor = CoinbasePerpsExecutor(API_JSON_FILE, config.perps_portfolio_uuid, TRADING_MODE)
+            active_executors.append(perps_executor)
+            logging.info(f"Perpetuals executor enabled (portfolio: {config.perps_portfolio_uuid})")
+        except Exception as e:
+            logging.error(f"Failed to init CoinbasePerpsExecutor: {e}")
 
     # Validate all executors implement required interface
     for executor in active_executors:
