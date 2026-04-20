@@ -12,10 +12,9 @@ from decimal import Decimal
 
 class CoinbaseExecutor:
     """Handles all interaction with the Coinbase API."""
-    def __init__(self, api_json_file, trading_mode="paper", portfolio_uuid=None):
+    def __init__(self, api_json_file, trading_mode="paper"):
         self.api_json_file = api_json_file
         self.trading_mode = trading_mode
-        self.portfolio_uuid = portfolio_uuid
         self.product_details_cache = {}
 
     def _get_credentials(self):
@@ -50,18 +49,13 @@ class CoinbaseExecutor:
 
     def get_balances(self):
         all_accounts = []
-        base_path = "/api/v3/brokerage/accounts"
-        params = []
-        if self.portfolio_uuid:
-            params.append(f"retail_portfolio_id={self.portfolio_uuid}")
-        path = f"{base_path}?{'&'.join(params)}" if params else base_path
+        path = "/api/v3/brokerage/accounts"
         while True:
             data = self.request("GET", path)
             if not data: break
             all_accounts.extend(data['accounts'])
             if not data.get('has_next'): break
-            cursor_params = params + [f"cursor={data['cursor']}"]
-            path = f"{base_path}?{'&'.join(cursor_params)}"
+            path = f"/api/v3/brokerage/accounts?cursor={data['cursor']}"
 
         # available: what we can trade right now
         # total: available + held (used for portfolio valuation)
@@ -186,8 +180,6 @@ class CoinbaseExecutor:
                 }
             }
         }
-        if self.portfolio_uuid:
-            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         logging.info(f"Placing LIMIT {side} (Post-Only) for {product_id} at {rounded_price} size={rounded_base}")
         if self.trading_mode == "live":
@@ -258,8 +250,6 @@ class CoinbaseExecutor:
                 }
             }
         }
-        if self.portfolio_uuid:
-            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         logging.info(f"Placing AGGRESSIVE LIMIT {side} for {product_id} at {rounded_price} size={rounded_base}")
         if self.trading_mode == "live":
@@ -291,8 +281,6 @@ class CoinbaseExecutor:
                 "market_market_ioc": {}
             }
         }
-        if self.portfolio_uuid:
-            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         if side == 'BUY' and amount_quote_currency:
             payload["order_configuration"]["market_market_ioc"]["quote_size"] = str(amount_quote_currency)

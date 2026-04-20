@@ -16,7 +16,6 @@ class ExecutorConfig:
 
     # Coinbase Configuration
     coinbase_enabled: bool
-    coinbase_portfolio_uuid: str | None
 
     # Ethereum/Base Configuration
     ethereum_enabled: bool
@@ -37,7 +36,6 @@ class ExecutorConfig:
             ))),
             log_file=Path(os.getenv("TRADING_LOG_FILE", os.path.join(home, ".openclaw", "workspace", "trading-bot", "trading.log"))),
             coinbase_enabled=True,  # Always enabled by default
-            coinbase_portfolio_uuid=os.getenv("COINBASE_PORTFOLIO_UUID") or None,
             ethereum_enabled=os.getenv("ENABLE_ETHEREUM", "false").lower() == "true",
             eth_rpc_url=os.getenv("ETH_RPC_URL"),
             eth_private_key=os.getenv("ETH_PRIVATE_KEY"),

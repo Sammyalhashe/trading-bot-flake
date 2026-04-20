@@ -61,8 +61,6 @@ logging.info(f"Dual-signal regime detection: {'ENABLED' if config.enable_dual_re
 logging.info(f"Bitcoin dominance tracking: {'ENABLED' if config.enable_btc_dominance else 'DISABLED'}")
 logging.info(f"Derivatives signals (OKX): {'ENABLED' if config.enable_derivatives_signals else 'DISABLED'}")
 logging.info(f"Trading mode: {exec_config.trading_mode}")
-if exec_config.coinbase_portfolio_uuid:
-    logging.info(f"Portfolio: {exec_config.coinbase_portfolio_uuid}")
 
 # Import strategy system
 from strategies import create_strategy
@@ -742,7 +740,7 @@ def run_bot(reset_to_usdc=False):
         release_run_lock()
 
 def _run_bot(reset_to_usdc=False):
-    cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE, portfolio_uuid=exec_config.coinbase_portfolio_uuid)
+    cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
     active_executors = [cb_executor]
 
     if ENABLE_ETHEREUM:
@@ -773,7 +771,7 @@ def _run_bot(reset_to_usdc=False):
 
     if config.enable_futures:
         try:
-            futures_executor = CoinbaseFuturesExecutor(API_JSON_FILE, TRADING_MODE, portfolio_uuid=exec_config.coinbase_portfolio_uuid)
+            futures_executor = CoinbaseFuturesExecutor(API_JSON_FILE, TRADING_MODE)
             active_executors.append(futures_executor)
             logging.info("CFM futures executor enabled (BTC/ETH nano contracts)")
         except Exception as e:
@@ -960,7 +958,7 @@ def run_ws_mode():
         logging.warning("Another bot instance is already running, exiting.")
         return
     try:
-        cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE, portfolio_uuid=exec_config.coinbase_portfolio_uuid)
+        cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
 
         # In-memory snapshots refreshed each scan cycle — ticks never hit
         # the filesystem or REST API unless an exit is actually triggered.
