@@ -27,6 +27,7 @@ class TestCoinbaseExecutorDustFiltering:
         with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
             executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
             executor.product_details_cache = {}
+            executor.portfolio_uuid = None
             return executor
 
     def test_dust_balances_filtered_out(self, mock_executor):
@@ -207,3 +208,130 @@ class TestCoinbaseExecutorDustFiltering:
         assert "BTC" in balances["available"]["crypto"]
         assert "ETH" in balances["available"]["crypto"]
         assert "DUST" not in balances["available"]["crypto"]
+
+
+class TestPortfolioFiltering:
+    """Test that portfolio_uuid scopes balances and orders."""
+
+    @pytest.fixture
+    def portfolio_executor(self):
+        """Create a CoinbaseExecutor with a portfolio_uuid set."""
+        with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
+            executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
+            executor.product_details_cache = {}
+            executor.portfolio_uuid = "test-portfolio-uuid-123"
+            executor.trading_mode = "paper"
+            return executor
+
+    @pytest.fixture
+    def no_portfolio_executor(self):
+        """Create a CoinbaseExecutor without a portfolio_uuid."""
+        with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
+            executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
+            executor.product_details_cache = {}
+            executor.portfolio_uuid = None
+            executor.trading_mode = "paper"
+            return executor
+
+    def test_get_balances_includes_portfolio_filter(self, portfolio_executor):
+        """When portfolio_uuid is set, accounts query includes retail_portfolio_id."""
+        portfolio_executor.request = MagicMock(return_value={
+            "accounts": [_acct("USDC", "1000.0")],
+            "has_next": False,
+        })
+
+        portfolio_executor.get_balances()
+
+        call_path = portfolio_executor.request.call_args[0][1]
+        assert "retail_portfolio_id=test-portfolio-uuid-123" in call_path
+
+    def test_get_balances_no_filter_without_portfolio(self, no_portfolio_executor):
+        """When portfolio_uuid is None, accounts query has no retail_portfolio_id."""
+        no_portfolio_executor.request = MagicMock(return_value={
+            "accounts": [_acct("USDC", "1000.0")],
+            "has_next": False,
+        })
+
+        no_portfolio_executor.get_balances()
+
+        call_path = no_portfolio_executor.request.call_args[0][1]
+        assert "retail_portfolio_id" not in call_path
+
+    def test_limit_order_includes_portfolio_id(self, portfolio_executor):
+        """Limit orders include retail_portfolio_id when portfolio is set."""
+        portfolio_executor.get_product_details = MagicMock(return_value={
+            "price": "100000.0",
+            "quote_increment": "0.01",
+            "base_increment": "0.0001",
+        })
+        portfolio_executor.get_best_bid_ask = MagicMock(return_value=(99999.0, 100001.0))
+
+        # Paper mode returns dict directly — check it doesn't crash
+        result = portfolio_executor.place_limit_order("BTC-USDC", "BUY", 100000.0, amount_quote_currency=1000.0)
+        assert result is not None
+
+    def test_limit_order_live_payload_has_portfolio(self, portfolio_executor):
+        """In live mode, order payload includes retail_portfolio_id."""
+        portfolio_executor.trading_mode = "live"
+        portfolio_executor.get_product_details = MagicMock(return_value={
+            "price": "100000.0",
+            "quote_increment": "0.01",
+            "base_increment": "0.0001",
+        })
+        portfolio_executor.get_best_bid_ask = MagicMock(return_value=(99999.0, 100001.0))
+        portfolio_executor.cancel_open_orders = MagicMock()
+        portfolio_executor.request = MagicMock(return_value={"success": True})
+
+        portfolio_executor.place_limit_order("BTC-USDC", "BUY", 100000.0, amount_quote_currency=1000.0)
+
+        payload = portfolio_executor.request.call_args[0][2]
+        assert payload["retail_portfolio_id"] == "test-portfolio-uuid-123"
+
+    def test_no_portfolio_id_in_order_when_none(self, no_portfolio_executor):
+        """Orders should NOT include retail_portfolio_id when portfolio is None."""
+        no_portfolio_executor.trading_mode = "live"
+        no_portfolio_executor.get_product_details = MagicMock(return_value={
+            "price": "100000.0",
+            "quote_increment": "0.01",
+            "base_increment": "0.0001",
+        })
+        no_portfolio_executor.get_best_bid_ask = MagicMock(return_value=(99999.0, 100001.0))
+        no_portfolio_executor.cancel_open_orders = MagicMock()
+        no_portfolio_executor.request = MagicMock(return_value={"success": True})
+
+        no_portfolio_executor.place_limit_order("BTC-USDC", "BUY", 100000.0, amount_quote_currency=1000.0)
+
+        payload = no_portfolio_executor.request.call_args[0][2]
+        assert "retail_portfolio_id" not in payload
+
+    def test_market_order_includes_portfolio_id(self, portfolio_executor):
+        """Market orders include retail_portfolio_id when portfolio is set."""
+        portfolio_executor.trading_mode = "live"
+        portfolio_executor.get_product_details = MagicMock(return_value={
+            "price": "100000.0",
+            "base_increment": "0.0001",
+        })
+        portfolio_executor.cancel_open_orders = MagicMock()
+        portfolio_executor.request = MagicMock(return_value={"success": True})
+
+        portfolio_executor.place_market_order("BTC-USDC", "SELL", amount_base_currency=0.01)
+
+        payload = portfolio_executor.request.call_args[0][2]
+        assert payload["retail_portfolio_id"] == "test-portfolio-uuid-123"
+
+    def test_aggressive_limit_includes_portfolio_id(self, portfolio_executor):
+        """Aggressive limit orders include retail_portfolio_id."""
+        portfolio_executor.trading_mode = "live"
+        portfolio_executor.get_product_details = MagicMock(return_value={
+            "price": "100000.0",
+            "quote_increment": "0.01",
+            "base_increment": "0.0001",
+        })
+        portfolio_executor.get_best_bid_ask = MagicMock(return_value=(99999.0, 100001.0))
+        portfolio_executor.cancel_open_orders = MagicMock()
+        portfolio_executor.request = MagicMock(return_value={"success": True})
+
+        portfolio_executor.place_aggressive_limit_order("BTC-USDC", "SELL", 100000.0, amount_base_currency=0.01)
+
+        payload = portfolio_executor.request.call_args[0][2]
+        assert payload["retail_portfolio_id"] == "test-portfolio-uuid-123"

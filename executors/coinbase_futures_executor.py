@@ -36,8 +36,8 @@ class CoinbaseFuturesExecutor(CoinbaseExecutor):
         "ETH": {"product_id": "ETP-20DEC30-CDE", "contract_size": 0.1},
     }
 
-    def __init__(self, api_json_file, trading_mode="paper"):
-        super().__init__(api_json_file, trading_mode)
+    def __init__(self, api_json_file, trading_mode="paper", portfolio_uuid=None):
+        super().__init__(api_json_file, trading_mode, portfolio_uuid=portfolio_uuid)
 
     def _to_futures_product_id(self, product_id):
         """Convert spot product ID (BTC-USDC) to CFM futures ID."""
@@ -207,6 +207,8 @@ class CoinbaseFuturesExecutor(CoinbaseExecutor):
                 }
             },
         }
+        if self.portfolio_uuid:
+            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         logging.info(f"Placing FUTURES LIMIT {side} for {futures_id} at {rounded_price} ({contracts} contracts)")
         if self.trading_mode == "live":
@@ -253,6 +255,8 @@ class CoinbaseFuturesExecutor(CoinbaseExecutor):
                 }
             },
         }
+        if self.portfolio_uuid:
+            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         logging.info(f"Placing AGGRESSIVE FUTURES LIMIT {side} for {futures_id} at {rounded_price} ({contracts} contracts)")
         if self.trading_mode == "live":
@@ -297,6 +301,8 @@ class CoinbaseFuturesExecutor(CoinbaseExecutor):
                 }
             },
         }
+        if self.portfolio_uuid:
+            payload["retail_portfolio_id"] = self.portfolio_uuid
 
         logging.info(f"Placing FUTURES MARKET {side} for {futures_id} ({contracts} contracts)")
         if self.trading_mode == "live":

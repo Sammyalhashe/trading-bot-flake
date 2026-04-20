@@ -16,6 +16,7 @@ def mock_executor():
         executor = CoinbaseFuturesExecutor.__new__(CoinbaseFuturesExecutor)
         executor.product_details_cache = {}
         executor.trading_mode = "paper"
+        executor.portfolio_uuid = None
         return executor
 
 
@@ -333,9 +334,9 @@ class TestInheritance:
         assert hasattr(mock_executor, 'check_order_filled')
         assert mock_executor.check_order_filled.__func__ is CoinbaseExecutor.check_order_filled
 
-    def test_no_portfolio_uuid(self, mock_executor):
-        """CFM doesn't need portfolio_uuid (unlike INTX)."""
-        assert not hasattr(mock_executor, 'portfolio_uuid')
+    def test_portfolio_uuid_optional(self, mock_executor):
+        """portfolio_uuid is optional (defaults to None)."""
+        assert mock_executor.portfolio_uuid is None
 
 
 class TestExecutorProtocol:
