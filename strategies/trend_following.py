@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 class TrendFollowingStrategy:
     """Original trend-following strategy extracted from run_executor_strategy."""
 
+    required_timeframes = {"1h": 55}
+
     def __init__(self, ta: TechnicalAnalysis, config: TradingConfig):
         self.ta = ta
         self.config = config
@@ -44,7 +46,8 @@ class TrendFollowingStrategy:
             return False
         return df['volume'].iloc[-1] >= avg_vol * self.config.volume_spike_threshold
 
-    def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
+    def scan_entry(self, asset: str, product_id: str, market_data, market_regime: str, full_regime: str) -> dict | None:
+        df = market_data["1h"]
         ma_s, ma_l = self.ta.analyze_trend(df)
 
         # BEAR regime: use momentum+RSI entry (MA crossover can't fire in BEAR)
@@ -165,9 +168,10 @@ class TrendFollowingStrategy:
     def rank_candidates(self, candidates: list[dict]) -> list[dict]:
         return sorted(candidates, key=lambda x: x["score"], reverse=True)
 
-    def check_exit(self, asset: str, product_id: str, df, price: float,
+    def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
                    state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+        df = market_data["1h"]
         sell_trigger = False
         current_price = df["close"].iloc[-1]
         sell_ratio = 1.0

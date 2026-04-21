@@ -10,6 +10,17 @@ import urllib.parse
 from cryptography.hazmat.primitives import serialization
 from decimal import Decimal
 
+GRANULARITY_MAP = {
+    "5m": "FIVE_MINUTE",
+    "15m": "FIFTEEN_MINUTE",
+    "30m": "THIRTY_MINUTE",
+    "1h": "ONE_HOUR",
+    "2h": "TWO_HOUR",
+    "6h": "SIX_HOUR",
+    "1d": "ONE_DAY",
+}
+
+
 class CoinbaseExecutor:
     """Handles all interaction with the Coinbase API."""
     def __init__(self, api_json_file, trading_mode="paper"):
@@ -92,8 +103,9 @@ class CoinbaseExecutor:
                             logging.debug(f"Ignoring dust balance: {cur} {total} (~${usd_value:.2f})")
         return balances
 
-    def get_market_data(self, product_id, window):
-        path = f"/api/v3/brokerage/products/{product_id}/candles?limit={window + 10}&granularity=ONE_HOUR"
+    def get_market_data(self, product_id, window, granularity="1h"):
+        api_gran = GRANULARITY_MAP.get(granularity, "ONE_HOUR")
+        path = f"/api/v3/brokerage/products/{product_id}/candles?limit={window + 10}&granularity={api_gran}"
         data = self.request("GET", path)
         if data and 'candles' in data:
             df = pd.DataFrame(data['candles'], columns=['start', 'low', 'high', 'open', 'close', 'volume'])

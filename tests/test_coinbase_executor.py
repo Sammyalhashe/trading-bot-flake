@@ -207,3 +207,46 @@ class TestCoinbaseExecutorDustFiltering:
         assert "BTC" in balances["available"]["crypto"]
         assert "ETH" in balances["available"]["crypto"]
         assert "DUST" not in balances["available"]["crypto"]
+
+
+class TestGranularityMapping:
+    """Test that get_market_data() maps granularity strings to API values."""
+
+    @pytest.fixture
+    def mock_executor(self):
+        with patch.object(CoinbaseExecutor, '__init__', lambda self, *a, **k: None):
+            executor = CoinbaseExecutor.__new__(CoinbaseExecutor)
+            executor.product_details_cache = {}
+            return executor
+
+    def test_default_granularity_is_one_hour(self, mock_executor):
+        mock_executor.request = MagicMock(return_value={
+            "candles": [["1700000000", "99000", "101000", "99500", "100500", "100.5"]]
+        })
+        mock_executor.get_market_data("BTC-USDC", 50)
+        path = mock_executor.request.call_args[0][1]
+        assert "granularity=ONE_HOUR" in path
+
+    def test_15m_granularity(self, mock_executor):
+        mock_executor.request = MagicMock(return_value={
+            "candles": [["1700000000", "99000", "101000", "99500", "100500", "100.5"]]
+        })
+        mock_executor.get_market_data("BTC-USDC", 50, granularity="15m")
+        path = mock_executor.request.call_args[0][1]
+        assert "granularity=FIFTEEN_MINUTE" in path
+
+    def test_1d_granularity(self, mock_executor):
+        mock_executor.request = MagicMock(return_value={
+            "candles": [["1700000000", "99000", "101000", "99500", "100500", "100.5"]]
+        })
+        mock_executor.get_market_data("BTC-USDC", 50, granularity="1d")
+        path = mock_executor.request.call_args[0][1]
+        assert "granularity=ONE_DAY" in path
+
+    def test_unknown_granularity_defaults_to_one_hour(self, mock_executor):
+        mock_executor.request = MagicMock(return_value={
+            "candles": [["1700000000", "99000", "101000", "99500", "100500", "100.5"]]
+        })
+        mock_executor.get_market_data("BTC-USDC", 50, granularity="3h")
+        path = mock_executor.request.call_args[0][1]
+        assert "granularity=ONE_HOUR" in path

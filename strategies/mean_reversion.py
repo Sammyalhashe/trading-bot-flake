@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 class MeanReversionStrategy:
     """Mean-reversion strategy: buy oversold assets, exit at SMA."""
 
+    required_timeframes = {"1h": 55}
+
     def __init__(self, ta: TechnicalAnalysis, config: TradingConfig):
         self.ta = ta
         self.config = config
@@ -20,7 +22,8 @@ class MeanReversionStrategy:
         # Skip BEAR and STRONG_BEAR — trends too strong for reversion
         return full_regime in ("BEAR", "STRONG_BEAR")
 
-    def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
+    def scan_entry(self, asset: str, product_id: str, market_data, market_regime: str, full_regime: str) -> dict | None:
+        df = market_data["1h"]
         if self.should_skip_regime(market_regime, full_regime):
             return None
 
@@ -58,9 +61,10 @@ class MeanReversionStrategy:
         # Most oversold first (lowest RSI)
         return sorted(candidates, key=lambda x: x["score"])
 
-    def check_exit(self, asset: str, product_id: str, df, price: float,
+    def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
                    state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+        df = market_data["1h"]
         bb_period = self.config.mr_bollinger_period
         stop_pct = float(self.config.mr_trailing_stop_pct)
         max_candles = self.config.mr_time_exit_candles

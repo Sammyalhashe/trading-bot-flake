@@ -124,10 +124,10 @@ class CoinbaseFuturesExecutor(CoinbaseExecutor):
 
         return balances
 
-    def get_market_data(self, product_id, window):
+    def get_market_data(self, product_id, window, granularity="1h"):
         """Get candle data using futures product ID."""
         futures_id = self._to_futures_product_id(product_id)
-        return super().get_market_data(futures_id, window)
+        return super().get_market_data(futures_id, window, granularity)
 
     def get_product_details(self, product_id):
         """Get product details, with contract-appropriate increments."""

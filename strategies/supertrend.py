@@ -24,6 +24,8 @@ class SupertrendStrategy:
     Exit: ATR trailing stop (primary), Supertrend flip (secondary), tiered TP.
     """
 
+    required_timeframes = {"1h": 55}
+
     def __init__(self, ta: TechnicalAnalysis, config: TradingConfig):
         self.ta = ta
         self.config = config
@@ -64,7 +66,8 @@ class SupertrendStrategy:
     def should_skip_regime(self, market_regime: str, full_regime: str) -> bool:
         return full_regime in ("BEAR", "STRONG_BEAR")
 
-    def scan_entry(self, asset: str, product_id: str, df, market_regime: str, full_regime: str) -> dict | None:
+    def scan_entry(self, asset: str, product_id: str, market_data, market_regime: str, full_regime: str) -> dict | None:
+        df = market_data["1h"]
         if self.should_skip_regime(market_regime, full_regime):
             return None
 
@@ -97,9 +100,10 @@ class SupertrendStrategy:
     def rank_candidates(self, candidates: list[dict]) -> list[dict]:
         return sorted(candidates, key=lambda x: x["score"], reverse=True)
 
-    def check_exit(self, asset: str, product_id: str, df, price: float,
+    def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
                    state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+        df = market_data["1h"]
         sell_trigger = False
         sell_ratio = 1.0
         reason = ""

@@ -24,5 +24,8 @@ def create_strategy(name: str, ta: TechnicalAnalysis, config: TradingConfig) -> 
     elif name == "supertrend":
         from strategies.supertrend import SupertrendStrategy
         return SupertrendStrategy(ta, config)
+    elif name == "mtf_trend":
+        from strategies.mtf_trend import MTFTrendStrategy
+        return MTFTrendStrategy(ta, config)
     else:
         raise ValueError(f"Unknown strategy: {name}")

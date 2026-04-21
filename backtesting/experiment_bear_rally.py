@@ -70,7 +70,7 @@ class ExperimentEngine(BacktestEngine):
                 candidate = strategy.scan_entry(
                     asset=asset.split('-')[0],
                     product_id=asset,
-                    df=df,
+                    market_data={"1h": df},
                     market_regime=market_regime,
                     full_regime=full_regime
                 )

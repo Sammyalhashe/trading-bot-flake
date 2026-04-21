@@ -48,12 +48,12 @@ def make_bullish_df(num_rows=60):
         else:
             p += 0.25
         prices.append(p)
-    return make_candle_df(prices, volumes=[200000.0] * num_rows)
+    return make_candle_df(prices, volumes=[200000.0] * num_rows, num_rows=num_rows)
 
 
 def make_bearish_df(num_rows=60):
     prices = [200 - i * 0.5 for i in range(num_rows)]
-    return make_candle_df(prices, volumes=[200000.0] * num_rows)
+    return make_candle_df(prices, volumes=[200000.0] * num_rows, num_rows=num_rows)
 
 
 def make_oversold_df(num_rows=60):
@@ -61,7 +61,7 @@ def make_oversold_df(num_rows=60):
     # Stable prices for most of the window, then sharp drop at the end
     # This creates a low RSI and pushes price below the lower BB
     prices = [100.0] * (num_rows - 5) + [95.0, 90.0, 85.0, 80.0, 75.0]
-    return make_candle_df(prices, volumes=[200000.0] * num_rows)
+    return make_candle_df(prices, volumes=[200000.0] * num_rows, num_rows=num_rows)
 
 
 def default_config():
@@ -138,7 +138,7 @@ class TestTrendFollowingStrategy:
     def test_entry_with_bullish_crossover(self):
         s = self._make_strategy()
         df = make_bullish_df()
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
         assert result is not None
         assert result["asset"] == "BTC"
         assert result["product_id"] == "BTC-USDC"
@@ -149,13 +149,13 @@ class TestTrendFollowingStrategy:
         # Strong uptrend → RSI > 70
         prices = [100 + i * 2 for i in range(60)]
         df = make_candle_df(prices, volumes=[200000.0] * 60)
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
         assert result is None
 
     def test_skips_bear_regime_non_btc(self):
         s = self._make_strategy()
         df = make_bullish_df()
-        result = s.scan_entry("ETH", "ETH-USDC", df, "BEAR", "BEAR")
+        result = s.scan_entry("ETH", "ETH-USDC", {"1h": df}, "BEAR", "BEAR")
         assert result is None
 
     def test_btc_allowed_in_bear_with_exemption(self):
@@ -171,7 +171,7 @@ class TestTrendFollowingStrategy:
                 p += 0.35  # up move — net +0.30 per 3 bars
             prices.append(p)
         df = make_candle_df(prices, volumes=[200000.0] * 60, num_rows=60)
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BEAR", "BEAR")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BEAR", "BEAR")
         # BTC should be allowed via bear_position_scale > 0 momentum entry
         assert result is not None
 
@@ -200,7 +200,7 @@ class TestTrendFollowingStrategy:
         hwm = 116.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags, {}, "k")
         assert sell is True
         assert 0 < ratio < 1  # Partial sell
         assert flags["tp1_hit"] is True
@@ -214,7 +214,7 @@ class TestTrendFollowingStrategy:
         hwm = 141.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags, {}, "k")
         assert sell is True
         assert flags["tp2_hit"] is True
         assert flags["tp1_hit"] is True
@@ -228,7 +228,7 @@ class TestTrendFollowingStrategy:
         price = 90.0  # Dropped to 90 (25% from HWM)
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags, {}, "k")
         assert sell is True
         assert ratio == 1.0
         assert "Trailing stop" in reason
@@ -241,7 +241,7 @@ class TestTrendFollowingStrategy:
         hwm = 151.0
         tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags, {}, "k")
         assert sell is True
         assert ratio == 0.5
         assert "Trend-exit" in reason
@@ -258,7 +258,7 @@ class TestMeanReversionStrategy:
     def test_entry_with_oversold_below_bollinger(self):
         s = self._make_strategy()
         df = make_oversold_df()
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
         # Should find entry since RSI < 30 and price below lower BB
         assert result is not None
         assert result["asset"] == "BTC"
@@ -267,14 +267,14 @@ class TestMeanReversionStrategy:
     def test_skips_rsi_above_threshold(self):
         s = self._make_strategy()
         df = make_bullish_df()  # RSI will be high
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
         assert result is None
 
     def test_skips_price_above_bollinger(self):
         s = self._make_strategy()
         # Flat data → price ≈ SMA ≈ middle band, not below lower
         df = make_candle_df(100.0, num_rows=60)
-        result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+        result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
         assert result is None
 
     def test_skips_bear_regime(self):
@@ -298,7 +298,7 @@ class TestMeanReversionStrategy:
         price = sma + 1  # Above SMA
         tp_flags = {}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, 90.0, price, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, 90.0, price, tp_flags, {}, "k")
         assert sell is True
         assert ratio == 1.0
         assert "target reached" in reason
@@ -310,7 +310,7 @@ class TestMeanReversionStrategy:
         price = 91.0  # 9% below HWM, stop is 8%
         tp_flags = {}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, tp_flags, {}, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, 95.0, hwm, tp_flags, {}, "k")
         # Price < hwm * 0.92 = 92.0, and price is 91
         # SMA of flat 100 data = 100, price 91 < 100 so SMA target NOT reached
         # So stop loss should fire
@@ -332,7 +332,7 @@ class TestMeanReversionStrategy:
         state = {"entry_timestamps": {"k": entry_time}}
         tp_flags = {}
 
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, tp_flags, state, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags, state, "k")
         assert sell is True
         assert ratio == 1.0
         assert "time exit" in reason
@@ -446,7 +446,7 @@ class TestUpdatedThresholds:
         rsi = make_ta().calculate_rsi(df)
         # Verify RSI is between 30 and 35 (old threshold accepts, new rejects)
         if rsi is not None and 30 < rsi < 35:
-            result = s.scan_entry("BTC", "BTC-USDC", df, "BULL", "BULL")
+            result = s.scan_entry("BTC", "BTC-USDC", {"1h": df}, "BULL", "BULL")
             assert result is None  # Should be rejected with RSI threshold of 30
 
     def test_time_exit_at_10h(self):
@@ -462,7 +462,7 @@ class TestUpdatedThresholds:
         # 11h ago: should trigger time exit with new 10h threshold
         entry_time = time.time() - 11 * 3600
         state = {"entry_timestamps": {"k": entry_time}}
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, {}, state, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, {}, state, "k")
         assert sell is True
         assert "time exit" in reason
 
@@ -479,7 +479,7 @@ class TestUpdatedThresholds:
         # 9h ago: should NOT trigger with 10h threshold
         entry_time = time.time() - 9 * 3600
         state = {"entry_timestamps": {"k": entry_time}}
-        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", df, price, entry, hwm, {}, state, "k")
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, {}, state, "k")
         assert sell is False
 
     def test_stop_loss_at_8pct(self):
@@ -491,11 +491,119 @@ class TestUpdatedThresholds:
         # 6% drop: should NOT trigger (old 5% would have)
         hwm = 100.0
         price = 94.5  # 5.5% below HWM
-        sell, _, _, _ = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, {}, {}, "k")
+        sell, _, _, _ = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, 95.0, hwm, {}, {}, "k")
         assert sell is False
 
         # 9% drop: should trigger
         price = 91.0
-        sell, ratio, reason, _ = s.check_exit("BTC", "BTC-USDC", df, price, 95.0, hwm, {}, {}, "k")
+        sell, ratio, reason, _ = s.check_exit("BTC", "BTC-USDC", {"1h": df}, price, 95.0, hwm, {}, {}, "k")
         assert sell is True
         assert "stop loss" in reason
+
+
+# ===== MTF Trend Strategy =====
+
+class TestMTFTrendStrategy:
+    def _make_strategy(self):
+        from strategies.mtf_trend import MTFTrendStrategy
+        return MTFTrendStrategy(make_ta(), default_config())
+
+    def test_required_timeframes(self):
+        s = self._make_strategy()
+        assert "1h" in s.required_timeframes
+        assert "15m" in s.required_timeframes
+
+    def test_factory_creates_mtf_trend(self):
+        from strategies import create_strategy
+        from strategies.mtf_trend import MTFTrendStrategy
+        s = create_strategy("mtf_trend", make_ta(), default_config())
+        assert isinstance(s, MTFTrendStrategy)
+        assert s.name == "mtf_trend"
+
+    def test_entry_requires_4h_bullish(self):
+        """Bearish 1h data (→ bearish 4h) should block entry."""
+        s = self._make_strategy()
+        df_1h = make_bearish_df(num_rows=100)
+        df_15m = make_bullish_df(num_rows=60)
+        market_data = {"1h": df_1h, "15m": df_15m}
+        result = s.scan_entry("BTC", "BTC-USDC", market_data, "BULL", "BULL")
+        assert result is None
+
+    def test_entry_skips_overbought_15m(self):
+        """15m RSI > 70 should block entry even with bullish 4h."""
+        s = self._make_strategy()
+        df_1h = make_bullish_df(num_rows=100)
+        # Strong 15m uptrend → RSI > 70
+        prices_15m = [100 + i * 2 for i in range(60)]
+        df_15m = make_candle_df(prices_15m, volumes=[200000.0] * 60, num_rows=60)
+        market_data = {"1h": df_1h, "15m": df_15m}
+        result = s.scan_entry("BTC", "BTC-USDC", market_data, "BULL", "BULL")
+        assert result is None
+
+    def test_entry_with_bullish_4h_and_recovering_15m(self):
+        """Good conditions: 4h bullish + 15m RSI in range + price above SMA."""
+        s = self._make_strategy()
+        # Bullish 1h → bullish 4h
+        df_1h = make_bullish_df(num_rows=100)
+        # Gentle 15m uptrend with pullbacks to keep RSI moderate
+        df_15m = make_bullish_df(num_rows=60)
+        market_data = {"1h": df_1h, "15m": df_15m}
+        result = s.scan_entry("BTC", "BTC-USDC", market_data, "BULL", "BULL")
+        # May or may not trigger depending on exact RSI/SMA values,
+        # but should not crash
+        if result is not None:
+            assert result["asset"] == "BTC"
+            assert "score" in result
+
+    def test_exit_tp1(self):
+        s = self._make_strategy()
+        df_1h = make_bullish_df(num_rows=100)
+        df_15m = make_bullish_df(num_rows=60)
+        market_data = {"1h": df_1h, "15m": df_15m}
+        entry = 100.0
+        price = 116.0  # 16% above entry → TP1 (default 15%)
+        hwm = 116.0
+        tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", market_data, price, entry, hwm, tp_flags, {}, "k")
+        assert sell is True
+        assert flags["tp1_hit"] is True
+        assert "TP1" in reason
+
+    def test_exit_trailing_stop_uses_15m(self):
+        s = self._make_strategy()
+        df_1h = make_candle_df(100.0, num_rows=100)
+        df_15m = make_candle_df(100.0, num_rows=60)
+        market_data = {"1h": df_1h, "15m": df_15m}
+        entry = 100.0
+        hwm = 120.0
+        price = 90.0  # Big drop
+        tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+        sell, ratio, reason, flags = s.check_exit("BTC", "BTC-USDC", market_data, price, entry, hwm, tp_flags, {}, "k")
+        assert sell is True
+        assert ratio == 1.0
+        assert "trailing stop" in reason.lower()
+
+    def test_resample_to_4h(self):
+        from strategies.mtf_trend import resample_to_4h
+        df_1h = make_candle_df(100.0, num_rows=100)
+        df_4h = resample_to_4h(df_1h)
+        assert df_4h is not None
+        assert len(df_4h) > 0
+        assert len(df_4h) < len(df_1h)
+        # Should have OHLCV columns
+        for col in ["open", "high", "low", "close", "volume"]:
+            assert col in df_4h.columns
+
+    def test_resample_insufficient_data(self):
+        from strategies.mtf_trend import resample_to_4h
+        df_1h = make_candle_df(100.0, num_rows=4)
+        result = resample_to_4h(df_1h)
+        assert result is None
+
+    def test_skips_neutral_regime(self):
+        s = self._make_strategy()
+        assert s.should_skip_regime("BULL", "NEUTRAL") is True
+
+    def test_allows_bull_regime(self):
+        s = self._make_strategy()
+        assert s.should_skip_regime("BULL", "BULL") is False

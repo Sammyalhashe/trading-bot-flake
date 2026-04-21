@@ -37,16 +37,17 @@ class TradingExecutor(Protocol):
     def get_market_data(
         self,
         product_id: str,
-        granularity: int = 3600,
-        candles: int = 300
+        window: int = 300,
+        granularity: str = "1h"
     ) -> pd.DataFrame:
         """
         Get historical market data (OHLCV).
 
         Args:
             product_id: Product identifier (e.g., "BTC-USDC")
-            granularity: Candle size in seconds (default: 3600 = 1 hour)
-            candles: Number of candles to fetch (default: 300)
+            window: Number of candles to fetch (default: 300)
+            granularity: Candle size string (default: "1h").
+                Valid: "5m", "15m", "30m", "1h", "2h", "6h", "1d"
 
         Returns:
             pd.DataFrame: Columns ['start', 'low', 'high', 'open', 'close', 'volume']

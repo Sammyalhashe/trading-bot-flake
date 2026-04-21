@@ -52,7 +52,7 @@ TIMEFRAMES = {
     "1d": 86400,
 }
 
-STRATEGIES = ["mean_reversion", "trend_following", "supertrend", "auto"]
+STRATEGIES = ["mean_reversion", "trend_following", "supertrend", "mtf_trend", "auto"]
 
 # MA ratios to test for trend-following strategies
 MA_RATIOS = [

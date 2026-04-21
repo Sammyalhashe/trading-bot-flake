@@ -126,6 +126,7 @@ class BacktestEngine:
             "trend_following": create_strategy("trend_following", self.ta, self.config),
             "mean_reversion": create_strategy("mean_reversion", self.ta, self.config),
             "supertrend": create_strategy("supertrend", self.ta, self.config),
+            "mtf_trend": create_strategy("mtf_trend", self.ta, self.config),
         }
 
         # Get the primary dataset for time iteration (use first asset)
@@ -194,6 +195,25 @@ class BacktestEngine:
         results = self._calculate_metrics(strategy_name)
         return results
 
+    def _build_market_data(self, strategy, df):
+        """Build market_data dict from a single DataFrame for the strategy.
+
+        For single-TF strategies: {"1h": df}
+        For MTF strategies needing 15m: {"1h": resampled_1h, "15m": df}
+        """
+        if "15m" in strategy.required_timeframes and "1h" in strategy.required_timeframes:
+            # Data is at 15m granularity; resample up to 1h for the "1h" key
+            df_indexed = df.set_index("timestamp") if "timestamp" in df.columns else df.set_index("start")
+            df_1h = df_indexed.resample("1h").agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna().reset_index()
+            # Rename back to 'start' if needed for TA compatibility
+            if "timestamp" in df_1h.columns:
+                df_1h = df_1h.rename(columns={"timestamp": "start"})
+            return {"1h": df_1h, "15m": df}
+        return {"1h": df}
+
     def _check_exits(self, strategy, prices: Dict[str, float],
                     dfs: Dict[str, pd.DataFrame], timestamp):
         """Check exit conditions for all positions."""
@@ -210,10 +230,11 @@ class BacktestEngine:
                 pos['hwm'] = price
 
             # Check exit conditions
+            market_data = self._build_market_data(strategy, df)
             should_exit, sell_ratio, reason, new_tp_flags = strategy.check_exit(
                 asset=asset.split('-')[0],  # BTC-USD -> BTC
                 product_id=asset,
-                df=df,
+                market_data=market_data,
                 price=price,
                 entry=pos['entry'],
                 hwm=pos['hwm'],
@@ -248,10 +269,11 @@ class BacktestEngine:
             if asset not in prices:
                 continue
 
+            market_data = self._build_market_data(strategy, df)
             candidate = strategy.scan_entry(
                 asset=asset.split('-')[0],
                 product_id=asset,
-                df=df,
+                market_data=market_data,
                 market_regime=market_regime,
                 full_regime=full_regime
             )
@@ -448,8 +470,8 @@ def main():
     parser.add_argument('--symbols', nargs='+', default=['BTC-USD', 'ETH-USD'],
                        help='Symbols to backtest (default: BTC-USD ETH-USD)')
     parser.add_argument('--strategies', nargs='+',
-                       default=['mean_reversion', 'trend_following', 'supertrend', 'auto'],
-                       help='Strategies to test: mean_reversion, trend_following, supertrend, auto')
+                       default=['mean_reversion', 'trend_following', 'supertrend', 'mtf_trend', 'auto'],
+                       help='Strategies to test: mean_reversion, trend_following, supertrend, mtf_trend, auto')
     parser.add_argument('--initial-capital', type=float, default=10000,
                        help='Initial capital in USD (default: 10000)')
     parser.add_argument('--ma-short', type=int, help='Override short MA window')

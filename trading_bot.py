@@ -83,8 +83,11 @@ def select_strategy_for_regime(full_regime):
 if config.strategy == "auto":
     strategy = _strategies["trend_following"]  # default until first regime detection
     logging.info("Strategy: auto (dynamic regime-adaptive switching)")
-else:
+elif config.strategy in _strategies:
     strategy = _strategies[config.strategy]
+    logging.info(f"Strategy: {strategy.name} (fixed)")
+else:
+    strategy = create_strategy(config.strategy, technical_analysis, config)
     logging.info(f"Strategy: {strategy.name} (fixed)")
 
 # Import specialized executors (after config loaded)
@@ -402,8 +405,14 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         if is_asset_blacklisted(asset): continue
         product_id = get_data_product_id(asset)
         try:
-            df = data_provider.get_market_data(product_id, LONG_WINDOW)
-            candidate = strategy.scan_entry(asset, product_id, df, market_regime, full_regime)
+            market_data = {}
+            for tf, window in strategy.required_timeframes.items():
+                md = data_provider.get_market_data(product_id, window, granularity=tf)
+                if md is not None:
+                    market_data[tf] = md
+            if len(market_data) < len(strategy.required_timeframes):
+                continue
+            candidate = strategy.scan_entry(asset, product_id, market_data, market_regime, full_regime)
             if candidate is not None:
                 asset_candidates.append(candidate)
         except Exception as e: logging.error(f"[{ex_id}] Error analyzing {asset}: {e}")
@@ -557,7 +566,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 continue
 
             # --- Fetch candle data once for trailing stop ATR and trend exit ---
-            df = data_provider.get_market_data(product_id, LONG_WINDOW)
+            market_data = {}
+            for tf, window in strategy.required_timeframes.items():
+                md = data_provider.get_market_data(product_id, window, granularity=tf)
+                if md is not None:
+                    market_data[tf] = md
 
             # --- Update high water mark ---
             hwm = state.get("high_water_marks", {}).get(entry_key, entry)
@@ -571,7 +584,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             tp_flags = state.get("take_profit_flags", {}).get(entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False})
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
-                asset, product_id, df, price, entry, hwm, tp_flags, state, entry_key
+                asset, product_id, market_data, price, entry, hwm, tp_flags, state, entry_key
             )
 
             # Persist updated tp_flags if they changed
@@ -962,7 +975,7 @@ def run_ws_mode():
 
         # In-memory snapshots refreshed each scan cycle — ticks never hit
         # the filesystem or REST API unless an exit is actually triggered.
-        _candle_cache = {}   # product_id -> df
+        _candle_cache = {}   # (product_id, timeframe) -> df
         _state_cache = {}    # full state dict
         _held_entries = {}   # entry_key -> entry_price (fast tick filter)
         _balances = {}       # asset -> amount
@@ -983,13 +996,14 @@ def run_ws_mode():
                 if key.startswith(f"{ex_id}:"):
                     _held_entries[key] = entry_price
 
-            # Pre-populate candle cache for held assets
+            # Pre-populate candle cache for held assets (all required timeframes)
             _candle_cache.clear()
             for key in _held_entries:
                 product_id = key[len(f"{ex_id}:"):]
-                df = cb_executor.get_market_data(product_id, LONG_WINDOW)
-                if df is not None:
-                    _candle_cache[product_id] = df
+                for tf, window in strategy.required_timeframes.items():
+                    df = cb_executor.get_market_data(product_id, window, granularity=tf)
+                    if df is not None:
+                        _candle_cache[(product_id, tf)] = df
 
         def on_tick(product_id, price):
             ex_id = "CoinbaseExecutor"
@@ -1005,9 +1019,12 @@ def run_ws_mode():
             if amt * price < float(config.min_order_usd):
                 return  # dust
 
-            df = _candle_cache.get(product_id)
-            if df is None:
-                return  # no candles yet, wait for next scan cycle
+            market_data = {}
+            for tf in strategy.required_timeframes:
+                cached_df = _candle_cache.get((product_id, tf))
+                if cached_df is None:
+                    return  # no candles yet for this TF, wait for scan cycle
+                market_data[tf] = cached_df
 
             state = _state_cache
             hwm = state.get("high_water_marks", {}).get(entry_key, entry)
@@ -1021,7 +1038,7 @@ def run_ws_mode():
             )
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
-                asset, product_id, df, price, entry, hwm, tp_flags, state, entry_key
+                asset, product_id, market_data, price, entry, hwm, tp_flags, state, entry_key
             )
 
             if not sell_trigger:
