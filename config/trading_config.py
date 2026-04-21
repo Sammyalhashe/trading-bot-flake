@@ -165,8 +165,8 @@ class TradingConfig:
             # Concentration Guard
             max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
 
-            # WebSocket Mode — 300s (5min) between full scans; ticks handle exits
-            ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "300")),
+            # WebSocket Mode — 120s between full scans; ticks handle exits
+            ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "120")),
 
             # Asset Configuration
             asset_blacklist=["DOGE", "SHLD", "SHIB"],
