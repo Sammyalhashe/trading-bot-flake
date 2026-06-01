@@ -146,8 +146,10 @@ class CoinbaseWSClient:
                 return
             except asyncio.TimeoutError:
                 pass
-            async with self._lock:
-                try:
-                    await asyncio.to_thread(self._on_scan_cycle)
-                except Exception as e:
-                    logging.error(f"Scan cycle error: {e}")
+            try:
+                # Run without holding the asyncio.Lock so tick processing is not
+                # blocked for the full duration of the scan cycle.  Shared-state
+                # dicts are protected by a threading.Lock inside on_scan_cycle.
+                await asyncio.to_thread(self._on_scan_cycle)
+            except Exception as e:
+                logging.error(f"Scan cycle error: {e}")

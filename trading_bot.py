@@ -2,6 +2,7 @@
 import os
 import time
 import datetime
+import threading
 import pandas as pd
 import json
 import logging
@@ -523,7 +524,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                         market_regime=full_regime,
                                         rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
                                 else:
-                                    logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, skipping entry update")
+                                    logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, cancelling stale order")
+                                    executor.cancel_open_orders(product_id)
                             else:
                                 # Paper mode — use requested price
                                 update_entry_price(ex_id, product_id, price, existing_qty, new_qty)
@@ -975,77 +977,84 @@ def run_ws_mode():
 
         # In-memory snapshots refreshed each scan cycle — ticks never hit
         # the filesystem or REST API unless an exit is actually triggered.
+        # _state_lock guards these dicts: on_tick runs in the asyncio event-loop
+        # thread while on_scan_cycle runs in asyncio.to_thread (worker thread).
         _candle_cache = {}   # (product_id, timeframe) -> df
         _state_cache = {}    # full state dict
         _held_entries = {}   # entry_key -> entry_price (fast tick filter)
         _balances = {}       # asset -> amount
+        _state_lock = threading.Lock()
 
         def _refresh_snapshots():
             """Reload state, balances, and candles from source of truth."""
-            state = load_state()
-            _state_cache.clear()
-            _state_cache.update(state)
-
-            bal = cb_executor.get_balances()
-            _balances.clear()
-            _balances.update(bal.get("crypto", {}))
-
-            _held_entries.clear()
             ex_id = "CoinbaseExecutor"
-            for key, entry_price in state.get("entry_prices", {}).items():
-                if key.startswith(f"{ex_id}:"):
-                    _held_entries[key] = entry_price
-
-            # Pre-populate candle cache for held assets (all required timeframes)
-            _candle_cache.clear()
-            for key in _held_entries:
+            # Do all I/O outside the lock to avoid blocking on_tick.
+            state = load_state()
+            bal = cb_executor.get_balances()
+            new_entries = {k: v for k, v in state.get("entry_prices", {}).items()
+                           if k.startswith(f"{ex_id}:")}
+            new_candles = {}
+            for key in new_entries:
                 product_id = key[len(f"{ex_id}:"):]
                 for tf, window in strategy.required_timeframes.items():
                     df = cb_executor.get_market_data(product_id, window, granularity=tf)
                     if df is not None:
-                        _candle_cache[(product_id, tf)] = df
+                        new_candles[(product_id, tf)] = df
+
+            # Atomically swap all shared dicts under the lock.
+            with _state_lock:
+                _state_cache.clear()
+                _state_cache.update(state)
+                _balances.clear()
+                _balances.update(bal.get("crypto", {}))
+                _held_entries.clear()
+                _held_entries.update(new_entries)
+                _candle_cache.clear()
+                _candle_cache.update(new_candles)
 
         def on_tick(product_id, price):
             ex_id = "CoinbaseExecutor"
             entry_key = f"{ex_id}:{product_id}"
 
-            # Fast path: skip products we don't hold (no I/O)
-            entry = _held_entries.get(entry_key)
-            if entry is None:
-                return
+            # Snapshot all shared state under the lock; do computation outside.
+            with _state_lock:
+                entry = _held_entries.get(entry_key)
+                if entry is None:
+                    return
+                asset = product_id.split("-")[0]
+                amt = _balances.get(asset, 0)
+                market_data = {}
+                for tf in strategy.required_timeframes:
+                    cached_df = _candle_cache.get((product_id, tf))
+                    if cached_df is None:
+                        return  # no candles yet for this TF, wait for scan cycle
+                    market_data[tf] = cached_df
+                hwm = _state_cache.get("high_water_marks", {}).get(entry_key, entry)
+                tp_flags = dict(_state_cache.get("take_profit_flags", {}).get(
+                    entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+                ))
 
-            asset = product_id.split("-")[0]
-            amt = _balances.get(asset, 0)
             if amt * price < float(config.min_order_usd):
                 return  # dust
 
-            market_data = {}
-            for tf in strategy.required_timeframes:
-                cached_df = _candle_cache.get((product_id, tf))
-                if cached_df is None:
-                    return  # no candles yet for this TF, wait for scan cycle
-                market_data[tf] = cached_df
-
-            state = _state_cache
-            hwm = state.get("high_water_marks", {}).get(entry_key, entry)
             if price > hwm:
                 hwm = price
-                state.setdefault("high_water_marks", {})[entry_key] = hwm
-                save_state(state)
-
-            tp_flags = state.get("take_profit_flags", {}).get(
-                entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
-            )
+                with _state_lock:
+                    _state_cache.setdefault("high_water_marks", {})[entry_key] = hwm
+                    state_snap = dict(_state_cache)
+                save_state(state_snap)
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
-                asset, product_id, market_data, price, entry, hwm, tp_flags, state, entry_key
+                asset, product_id, market_data, price, entry, hwm, tp_flags, _state_cache, entry_key
             )
 
             if not sell_trigger:
                 return
 
-            state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
-            save_state(state)
+            with _state_lock:
+                _state_cache.setdefault("take_profit_flags", {})[entry_key] = tp_flags
+                state_snap = dict(_state_cache)
+            save_state(state_snap)
 
             logging.info(f"[WS] {reason}")
             # Fetch fresh balance for the actual sell amount
@@ -1082,8 +1091,9 @@ def run_ws_mode():
                     logging.info(f"[WS] PnL: ${pnl:+.2f}")
                 if sell_ratio == 1.0:
                     clear_entry_price("CoinbaseExecutor", product_id)
-                    del _held_entries[entry_key]
-                    _balances.pop(asset, None)
+                    with _state_lock:
+                        _held_entries.pop(entry_key, None)
+                        _balances.pop(asset, None)
 
         def on_scan_cycle():
             logging.info("[WS] Running periodic full scan...")

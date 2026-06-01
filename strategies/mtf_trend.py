@@ -30,6 +30,10 @@ def resample_to_4h(df_1h):
         "close": "last",
         "volume": "sum",
     }).dropna()
+    # Drop the last row: it's a partial (in-progress) 4h candle whose close
+    # is just the most recent 1h close, not a confirmed 4h close.
+    if len(resampled) > 0:
+        resampled = resampled.iloc[:-1]
     return resampled.reset_index()
 
 
@@ -40,7 +44,7 @@ class MTFTrendStrategy:
     Exit: 15m ATR trailing stop (tight) + 4h trend reversal
     """
 
-    required_timeframes = {"1h": 100, "15m": 60}
+    required_timeframes = {"1h": 250, "15m": 60}
 
     def __init__(self, ta: TechnicalAnalysis, config: TradingConfig):
         self.ta = ta
