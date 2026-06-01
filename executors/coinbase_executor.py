@@ -319,4 +319,5 @@ class CoinbaseExecutor:
         # - POL (MATIC): Ethereum scaling
         # - UNI, AAVE: Blue-chip DeFi protocols
         # - ONDO: Real World Assets (RWA)
-        return ["BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO"]
+        # - TAO: Bittensor (decentralized AI infrastructure)
+        return ["BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO", "TAO"]
