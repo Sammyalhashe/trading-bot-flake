@@ -63,6 +63,13 @@
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
               --set PYTHONPATH $out/bin
 
+            # Rename PnL report bot
+            mv $out/bin/pnl_report.py $out/bin/trading-pnl
+            chmod +x $out/bin/trading-pnl
+            wrapProgram $out/bin/trading-pnl \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
+
             # Transaction debugger
             mv $out/bin/debug_tx.py $out/bin/debug-tx
             chmod +x $out/bin/debug-tx
@@ -109,6 +116,10 @@
           notify = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/trading-notify";
+          };
+          pnl = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/trading-pnl";
           };
           debug-tx = {
             type = "app";
