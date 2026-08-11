@@ -312,12 +312,19 @@ class CoinbaseExecutor:
 
     def get_supported_assets(self):
         """Return list of assets supported by Coinbase for trading."""
-        # Focus on established, serious projects:
+        # Focus on established, serious projects across uncorrelated sectors:
         # - BTC, ETH: Blue chips
-        # - SOL, AVAX, SUI: Major L1s
+        # - SOL, AVAX, SUI, NEAR: Major / alt L1s
         # - LINK: Oracle infrastructure
         # - POL (MATIC): Ethereum scaling
-        # - UNI, AAVE: Blue-chip DeFi protocols
+        # - UNI, AAVE, INJ: DeFi protocols
         # - ONDO: Real World Assets (RWA)
-        # - TAO: Bittensor (decentralized AI infrastructure)
-        return ["BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO", "TAO"]
+        # - TAO, RENDER, FET: AI / DePIN compute
+        # - TIA: Modular / data availability
+        # - XRP, LTC: Payments / large-cap store-of-value
+        # - HBAR: Enterprise DLT
+        # (APT omitted: ~$260k 24h volume, below the 500k floor — revisit later.)
+        return [
+            "BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO", "TAO",
+            "XRP", "LTC", "HBAR", "NEAR", "TIA", "INJ", "RENDER", "FET",
+        ]
