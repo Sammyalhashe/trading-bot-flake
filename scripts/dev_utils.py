@@ -76,12 +76,12 @@ def test_executor_prices(product_ids=None):
 
 
 def test_pool_addresses():
-    """Test pool address lookup"""
-    from executors.ethereum_executor import POOLS
+    """Show the Aerodrome contracts used for routing (pools are discovered per swap)"""
+    from executors.ethereum_executor import AERODROME_ROUTER_ADDRESS, AERODROME_POOL_FACTORY_ADDRESS
 
-    print("Configured pool addresses:")
-    for product_id, pool_info in POOLS.items():
-        print(f"  {product_id}: {pool_info['address']}")
+    print("Aerodrome contracts:")
+    print(f"  Router:      {AERODROME_ROUTER_ADDRESS}")
+    print(f"  PoolFactory: {AERODROME_POOL_FACTORY_ADDRESS}")
     print()
 
 

@@ -364,10 +364,12 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     # Calculate local value using TOTAL balances
     ex_value = cash_total
+    asset_prices = {}
     for asset, amt in held_total.items():
         details = data_provider.get_product_details(get_data_product_id(asset))
         if details:
-            ex_value += amt * float(details['price'])
+            asset_prices[asset] = float(details['price'])
+            ex_value += amt * asset_prices[asset]
         else:
             logging.warning(f"[{ex_id}] Could not price {asset} (product_id={get_data_product_id(asset)}), excluding from portfolio value")
 
@@ -390,7 +392,15 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     if reset_to_usdc:
         for asset, amount in held_avail.items():
             if asset in ["USD", "USDC"] or is_asset_blacklisted(asset): continue
-            executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount)
+            if isinstance(executor, EthereumExecutor):
+                # On-chain sells need an off-chain reference price so a thin pool can't fill far below market.
+                if asset not in asset_prices:
+                    logging.error(f"[{ex_id}] No reference price for {asset}; skipping on-chain reset sell")
+                    continue
+                executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount,
+                                            reference_price=asset_prices[asset])
+            else:
+                executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount)
             clear_entry_price(ex_id, get_data_product_id(asset))
         return ex_value
 
@@ -618,6 +628,10 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     exit_price = price  # default to requested price
                     actual_sell_fee = None  # set by check_order_filled if available
                     if isinstance(result, dict) and result.get("success") is False:
+                        if result.get("pending"):
+                            # The original sell may still land; a fallback sell could sell the position twice.
+                            logging.error(f"[{ex_id}] Sell {asset} unconfirmed (tx {result.get('tx_hash')}); not retrying")
+                            continue
                         # Last resort: market order fallback for stop losses
                         if is_stop_loss:
                             logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Last-resort market order.")

@@ -1,5 +1,8 @@
 # Uniswap V3 Swaps on Base — How It Works
 
+> **Superseded:** `executors/ethereum_executor.py` now routes through Aerodrome, not Uniswap V3.
+> See that module's docstring for the current RPC trust model and safety settings.
+
 ## Overview
 
 This bot swaps ERC-20 tokens on Base using Uniswap V3 through the `EthereumExecutor`
