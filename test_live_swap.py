@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from executors.ethereum_executor import EthereumExecutor, TOKENS, POOL_FEES
+from executors.ethereum_executor import EthereumExecutor, TOKENS
 from web3 import Web3
 
 def main():
@@ -77,7 +77,7 @@ def main():
     
     print("\n3. Executing swap...")
     if args.side == 'BUY':
-        result = executor.place_market_order(args.product, args.side, amount_quote_currency=args.amount)
+        result = executor.place_market_order(args.product, args.side, amount_quote_currency=args.amount, reference_price=price)
     else:
         # For SELL, need amount_base_currency; assume we want to sell all ETH? We'll just sell a small amount.
         # Not implemented for this test.

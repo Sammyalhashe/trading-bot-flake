@@ -288,6 +288,57 @@ class TestTrendExitFlag:
         assert tp_flags.get("trend_exit_hit") is True
 
 
+class TestStopLossFallback:
+    def _run_stop_loss(self, mock_executor, mock_data_provider, limit_result):
+        import trading_bot
+        del mock_executor.place_aggressive_limit_order  # EthereumExecutor has no aggressive limit path
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        mock_data_provider.get_product_details.return_value = {
+            "price": "150.0", "quote_increment": "0.01", "base_increment": "0.001",
+        }
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 200.0)
+        mock_executor.place_limit_order.return_value = limit_result
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+        sells = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
+        assert sells, "stop-loss should have attempted a sell"
+
+    def test_rejected_stop_loss_falls_back_to_market(self, temp_state_file, mock_executor, mock_data_provider):
+        self._run_stop_loss(mock_executor, mock_data_provider, {"success": False, "error": "reverted"})
+        mock_executor.place_market_order.assert_called()
+
+    def test_pending_stop_loss_is_not_resold(self, temp_state_file, mock_executor, mock_data_provider):
+        self._run_stop_loss(mock_executor, mock_data_provider,
+                            {"success": False, "pending": True, "error": "transaction pending", "tx_hash": "0xabc"})
+        mock_executor.place_market_order.assert_not_called()
+
+
+class TestResetToUsdcOnChain:
+    def _eth_executor(self, crypto):
+        from executors.ethereum_executor import EthereumExecutor
+        executor = MagicMock(spec=EthereumExecutor)
+        executor.get_balances.return_value = {"cash": {"USDC": 0.0}, "crypto": crypto}
+        executor.get_supported_assets.return_value = ["BTC"]
+        return executor
+
+    def test_reset_sell_passes_reference_price(self, temp_state_file, mock_data_provider):
+        import trading_bot
+        executor = self._eth_executor({"BTC": 0.5})
+
+        trading_bot.run_executor_strategy(executor, mock_data_provider, "BULL", reset_to_usdc=True)
+
+        executor.place_market_order.assert_called_once_with(
+            "BTC-USDC", 'SELL', amount_base_currency=0.5, reference_price=100.0)
+
+    def test_reset_sell_skipped_without_reference_price(self, temp_state_file, mock_data_provider):
+        import trading_bot
+        executor = self._eth_executor({"BTC": 0.5})
+        mock_data_provider.get_product_details.return_value = None
+
+        trading_bot.run_executor_strategy(executor, mock_data_provider, "BULL", reset_to_usdc=True)
+
+        executor.place_market_order.assert_not_called()
+
+
 # ===== Test Fee-Aware PnL =====
 
 class TestFeeAwarePnL:
@@ -406,11 +457,9 @@ class TestEthereumExecutor:
         from executors.ethereum_executor import TOKENS
         assert "POL" not in TOKENS
 
-    def test_execute_swap_default_fee_not_500(self):
-        """Verify execute_swap no longer defaults to fee=500."""
+    def test_execute_swap_has_no_uniswap_fee_tier(self):
+        """Aerodrome routes carry a stable/volatile flag, not a Uniswap V3 fee tier."""
         import inspect
         from executors.ethereum_executor import EthereumExecutor
         sig = inspect.signature(EthereumExecutor.execute_swap)
-        fee_param = sig.parameters.get('fee')
-        assert fee_param is not None
-        assert fee_param.default != 500, "execute_swap should not default to fee=500"
+        assert 'fee' not in sig.parameters
