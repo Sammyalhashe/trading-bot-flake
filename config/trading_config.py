@@ -163,7 +163,7 @@ class TradingConfig:
             futures_round_trip_fee_pct=Decimal(os.getenv("FUTURES_ROUND_TRIP_FEE_PCT", "0.0006")),
 
             # Concentration Guard
-            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "3")),
+            max_concurrent_positions=int(os.getenv("MAX_CONCURRENT_POSITIONS", "5")),
 
             # WebSocket Mode — 120s between full scans; ticks handle exits
             ws_scan_interval=int(os.getenv("WS_SCAN_INTERVAL", "120")),
