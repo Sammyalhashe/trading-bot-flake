@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import html
 import time
 import datetime
 import threading
@@ -267,7 +268,7 @@ def _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl):
         f"Entry: ${entry:,.2f}\n"
         f"Amount: {sell_amount:.6f}\n"
         f"PnL: ${pnl:+.2f}\n"
-        f"Reason: {reason}\n"
+        f"Reason: {html.escape(reason)}\n"
         f"Executor: {ex_id}"
     )
     send_telegram_message(msg)

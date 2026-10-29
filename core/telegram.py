@@ -38,5 +38,12 @@ def send_telegram_message(message, parse_mode="HTML"):
         response.raise_for_status()
         return True
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
+        detail = str(e)
+        if isinstance(e, requests.HTTPError) and e.response is not None:
+            try:
+                detail = f"HTTP {e.response.status_code}: {e.response.json().get('description', detail)}"
+            except ValueError:
+                pass
+        # requests puts the full URL, bot token included, into exception messages.
+        logger.error(f"Failed to send Telegram message: {detail.replace(token, '<redacted>')}")
         return False
