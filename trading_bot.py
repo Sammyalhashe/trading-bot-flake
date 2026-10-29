@@ -121,6 +121,9 @@ TAKE_PROFIT_2_SELL_RATIO = float(config.take_profit_2_sell_ratio)
 ASSET_MAPPING = config.asset_mapping
 
 # --- Helpers ---
+# Native ETH pays on-chain gas; trading it away would strand the wallet.
+GAS_RESERVE_ASSETS = {"ETH_NATIVE"}
+
 def get_data_product_id(asset):
     mapped = ASSET_MAPPING.get(asset.upper(), asset.upper())
     return f"{mapped}-USDC"
@@ -391,7 +394,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     if reset_to_usdc:
         for asset, amount in held_avail.items():
-            if asset in ["USD", "USDC"] or is_asset_blacklisted(asset): continue
+            if asset in ["USD", "USDC"] or asset in GAS_RESERVE_ASSETS or is_asset_blacklisted(asset): continue
             if isinstance(executor, EthereumExecutor):
                 # On-chain sells need an off-chain reference price so a thin pool can't fill far below market.
                 if asset not in asset_prices:
@@ -441,7 +444,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     asset_candidates = sorted(asset_candidates[:TOP_MOMENTUM_COUNT], key=lambda x : held_total.get(x["asset"], 0) > 0, reverse=True)
 
     # Concurrent position guard: count non-stablecoin holdings for this executor
-    current_positions = sum(1 for a in held_total if a not in ("USD", "USDC") and held_total[a] > 0)
+    current_positions = sum(1 for a in held_total
+                            if a not in ("USD", "USDC") and a not in GAS_RESERVE_ASSETS and held_total[a] > 0)
     max_positions = config.max_concurrent_positions
 
     available_usdc = cash_avail
@@ -554,7 +558,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     # Manage Sells
     for asset, amt in held_avail.items():
-        if asset in ["USD", "USDC"]: continue
+        if asset in ["USD", "USDC"] or asset in GAS_RESERVE_ASSETS: continue
         product_id = get_data_product_id(asset)
         try:
             price_data = data_provider.get_product_details(product_id)

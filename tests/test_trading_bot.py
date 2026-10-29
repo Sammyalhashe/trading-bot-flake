@@ -339,6 +339,50 @@ class TestResetToUsdcOnChain:
         executor.place_market_order.assert_not_called()
 
 
+class TestGasReserve:
+    def test_native_eth_is_never_adopted_or_sold(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 0.0}, "crypto": {"ETH_NATIVE": 5.0}}
+
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+        assert trading_bot.load_state().get("entry_prices", {}) == {}
+        sells = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
+        assert not sells
+        mock_executor.place_market_order.assert_not_called()
+
+    def test_reset_to_usdc_keeps_native_eth(self, temp_state_file, mock_data_provider):
+        import trading_bot
+        from executors.ethereum_executor import EthereumExecutor
+        executor = MagicMock(spec=EthereumExecutor)
+        executor.get_balances.return_value = {"cash": {"USDC": 0.0}, "crypto": {"ETH_NATIVE": 5.0, "BTC": 0.5}}
+        executor.get_supported_assets.return_value = ["BTC"]
+
+        trading_bot.run_executor_strategy(executor, mock_data_provider, "BULL", reset_to_usdc=True)
+
+        executor.place_market_order.assert_called_once_with(
+            "BTC-USDC", 'SELL', amount_base_currency=0.5, reference_price=100.0)
+
+    def test_native_eth_does_not_take_a_position_slot(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        prices = []
+        p = 100.0
+        for i in range(60):
+            p = p - 0.15 if i % 2 == 1 else p + 0.25
+            prices.append(p)
+        mock_data_provider.get_market_data.return_value = make_candle_df(prices, volumes=[200000.0] * 60)
+        mock_data_provider.get_product_details.return_value = {
+            "price": str(prices[-1]), "quote_increment": "0.01", "base_increment": "0.001",
+        }
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 10000.0}, "crypto": {"ETH_NATIVE": 5.0}}
+
+        with patch.object(trading_bot.config, "max_concurrent_positions", 1):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+
+        buys = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'BUY']
+        assert buys, "gas reserve should not count against max_concurrent_positions"
+
+
 # ===== Test Fee-Aware PnL =====
 
 class TestFeeAwarePnL:
