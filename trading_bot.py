@@ -306,6 +306,38 @@ def regime_to_legacy(regime):
     """Wrapper for backward compatibility"""
     return regime_detector.regime_to_legacy(regime)
 
+REGIME_CONFIRM_COUNT = 3
+
+def apply_regime_hysteresis(full_regime):
+    """Return the regime to act on: a new reading must repeat REGIME_CONFIRM_COUNT times to replace the confirmed one."""
+    state = load_state()
+    if "confirmed_regime" not in state:
+        # Without this seed the comparison below always matched and the streak never started.
+        state["confirmed_regime"] = full_regime
+        state["regime_streak"] = 0
+        save_state(state)
+        return full_regime
+
+    prev_regime = state["confirmed_regime"]
+    if full_regime == prev_regime:
+        if state.get("regime_streak", 0) != 0:
+            state["regime_streak"] = 0
+            save_state(state)
+        return full_regime
+
+    streak = state.get("regime_streak", 0) + 1
+    if streak >= REGIME_CONFIRM_COUNT:
+        logging.info(f"Regime change confirmed: {prev_regime} → {full_regime} (after {streak} consecutive signals)")
+        state["confirmed_regime"] = full_regime
+        state["regime_streak"] = 0
+        save_state(state)
+        return full_regime
+
+    logging.info(f"Regime signal: {full_regime} (pending confirmation {streak}/{REGIME_CONFIRM_COUNT}, using {prev_regime})")
+    state["regime_streak"] = streak
+    save_state(state)
+    return prev_regime
+
 def get_btc_dominance():
     """Wrapper for backward compatibility"""
     return regime_detector.get_btc_dominance()
@@ -930,29 +962,10 @@ def _run_bot(reset_to_usdc=False):
         full_regime = market_regime  # Same as market_regime in single-asset mode
         logging.info(f"Market Regime ({TREND_ASSET}): {market_regime}")
 
-    # Regime hysteresis: require N consecutive confirmations before switching
-    # This prevents whipsawing between regimes on noisy signals.
-    REGIME_CONFIRM_COUNT = 3
-    state = load_state()
-    prev_regime = state.get("confirmed_regime", full_regime)
-    if full_regime != prev_regime:
-        streak = state.get("regime_streak", 0) + 1
-        state["regime_streak"] = streak
-        if streak >= REGIME_CONFIRM_COUNT:
-            logging.info(f"Regime change confirmed: {prev_regime} → {full_regime} (after {streak} consecutive signals)")
-            state["confirmed_regime"] = full_regime
-            state["regime_streak"] = 0
-            save_state(state)
-        else:
-            logging.info(f"Regime signal: {full_regime} (pending confirmation {streak}/{REGIME_CONFIRM_COUNT}, using {prev_regime})")
-            full_regime = prev_regime  # Keep using previous confirmed regime
-            market_regime = regime_to_legacy(full_regime)
-            save_state(state)
-    else:
-        # Same regime — reset streak
-        if state.get("regime_streak", 0) != 0:
-            state["regime_streak"] = 0
-            save_state(state)
+    confirmed_regime = apply_regime_hysteresis(full_regime)
+    if confirmed_regime != full_regime:
+        full_regime = confirmed_regime
+        market_regime = regime_to_legacy(full_regime)
 
     # Dynamic strategy switching based on regime
     global strategy

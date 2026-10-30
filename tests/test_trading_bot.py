@@ -599,3 +599,27 @@ class TestStopOutCooldown:
         reloaded = StateManager(temp_state_file)
         remaining = reloaded.get_cooldown_remaining_hours("TestExecutor", "BTC-USDC", 12.0)
         assert 11.9 < remaining <= 12.0
+
+
+class TestRegimeHysteresis:
+    def test_first_reading_seeds_confirmed_regime(self, temp_state_file):
+        import trading_bot
+        assert trading_bot.apply_regime_hysteresis("BEAR") == "BEAR"
+        assert trading_bot.load_state()["confirmed_regime"] == "BEAR"
+
+    def test_change_needs_three_consecutive_readings(self, temp_state_file):
+        import trading_bot
+        trading_bot.apply_regime_hysteresis("BEAR")
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BULL"
+        assert trading_bot.load_state()["confirmed_regime"] == "BULL"
+
+    def test_matching_reading_resets_the_streak(self, temp_state_file):
+        import trading_bot
+        trading_bot.apply_regime_hysteresis("BEAR")
+        trading_bot.apply_regime_hysteresis("BULL")
+        trading_bot.apply_regime_hysteresis("BEAR")
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
+        assert trading_bot.apply_regime_hysteresis("BULL") == "BULL"
