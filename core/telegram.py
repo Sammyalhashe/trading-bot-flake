@@ -1,5 +1,6 @@
 """Shared Telegram messaging utility."""
 import os
+import html
 import logging
 import requests
 
@@ -47,3 +48,49 @@ def send_telegram_message(message, parse_mode="HTML"):
         # requests puts the full URL, bot token included, into exception messages.
         logger.error(f"Failed to send Telegram message: {detail.replace(token, '<redacted>')}")
         return False
+
+
+def exit_reason_label(reason, max_len=24):
+    """Map a long strategy exit reason to a short, HTML-escaped label."""
+    text = reason or ""
+    lower = text.lower()
+    if "[breakeven]" in lower:
+        return "Breakeven stop"
+    if "trailing stop" in lower:
+        return "Trailing stop"
+    if "take-profit level 2" in lower or "tp2" in lower:
+        return "Take-profit 2"
+    if "take-profit level 1" in lower or "tp1" in lower:
+        return "Take-profit 1"
+    if "take-profit" in lower:
+        return "Take-profit"
+    if "trend-exit" in lower or "trend exit" in lower:
+        return "Trend exit"
+    if len(text) > max_len:
+        text = text[:max_len - 1] + "\u2026"
+    return html.escape(text or "-")
+
+
+def exchange_label(executor_id):
+    """Short venue name from an executor id like 'EthereumExecutor_0x4FA0'."""
+    name = executor_id or ""
+    if name.startswith("CoinbaseFutures"):
+        return "Coinbase Futures"
+    if name.startswith("Coinbase"):
+        return "Coinbase"
+    if name.startswith("Ethereum"):
+        return "Base"
+    return html.escape(name.split("Executor")[0] or name)
+
+
+def format_price(price):
+    """Price with precision suited to its magnitude."""
+    if price >= 1:
+        return f"${price:,.2f}"
+    return f"${price:.4f}" if price >= 0.01 else f"${price:.6f}"
+
+
+def format_usd(amount, signed=False, whole=False):
+    """USD with a true minus sign, e.g. -$20.03 or +$1,052."""
+    sign = ("+" if amount >= 0 else "\u2212") if signed else ("\u2212" if amount < 0 else "")
+    return f"{sign}${abs(amount):,.0f}" if whole else f"{sign}${abs(amount):,.2f}"

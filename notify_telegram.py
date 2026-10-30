@@ -2,6 +2,7 @@
 import os
 import html
 import json
+import re
 import sys
 from datetime import datetime
 
@@ -97,6 +98,48 @@ def extract_market_status(report):
 
     return ("Unknown", None, None)
 
+REGIME_ORDER = ["STRONG_BEAR", "BEAR", "NEUTRAL", "BULL", "STRONG_BULL"]
+
+def regime_emoji(old, new):
+    """Chart-up when the regime became more bullish, chart-down otherwise."""
+    if old in REGIME_ORDER and new in REGIME_ORDER:
+        return "📈" if REGIME_ORDER.index(new) > REGIME_ORDER.index(old) else "📉"
+    return REGIME_CHANGE_EMOJI
+
+def extract_signal_lines(report):
+    """Short BTC trend / ETH-BTC rotation lines from the latest matching log lines."""
+    lines = []
+    btc = re.findall(r"BTC Macro: (\$[\d,]+).*?Spread: ([+-]?[\d.]+)%", report)
+    if btc:
+        price, spread = btc[-1]
+        lines.append(f"BTC {price} · MA spread {float(spread):+.1f}%")
+    eth = re.findall(r"Ratio=([\d.]+) \(ETH (\$[\d,]+) / BTC (\$[\d,]+)\)", report)
+    if eth:
+        ratio, eth_price, _ = eth[-1]
+        lines.append(f"ETH/BTC {float(ratio):.4f} · ETH {eth_price}")
+    return lines
+
+def format_change_time(iso_time):
+    try:
+        return datetime.fromisoformat(iso_time).strftime("%b %d %H:%M")
+    except (TypeError, ValueError):
+        return str(iso_time)
+
+def build_regime_message(old_regime, new_regime, btc_macro, rotation, report, transactions):
+    lines = [f"{regime_emoji(old_regime, new_regime)} <b>Regime: {html.escape(old_regime)} → {html.escape(new_regime)}</b>", ""]
+    if btc_macro:
+        lines.append(f"BTC trend: {html.escape(btc_macro)}")
+    if rotation:
+        lines.append(f"Rotation: {html.escape(rotation)}")
+    lines.extend(html.escape(line) for line in extract_signal_lines(report))
+    recent = transactions[-3:]
+    if recent:
+        lines += ["", "<b>Recent</b>"]
+        for tx in recent:
+            change = tx.get("change") or tx.get("detail", "")
+            lines.append(f"{format_change_time(tx.get('time'))} · {html.escape(change)}")
+    return "\n".join(lines)
+
 def main():
     print(f"[{datetime.now()}] Notify script running...")
     if not os.path.exists(REPORT_FILE):
@@ -113,7 +156,8 @@ def main():
     # Only proceed if regime changed
     if state["last_status"] != current_regime:
         # Regime changed - determine direction and reason
-        change_type = f"{state['last_status']} → {current_regime}"
+        previous_regime = state["last_status"]
+        change_type = f"{previous_regime} → {current_regime}"
 
         # Map regime to bullish/bearish for legacy counters
         def is_bullish_regime(regime):
@@ -143,7 +187,8 @@ def main():
         # Record the change event
         state["transactions"].append({
             "time": datetime.now().isoformat(),
-            "detail": detail_msg
+            "detail": detail_msg,
+            "change": change_type
         })
 
         # Update state
@@ -156,18 +201,9 @@ def main():
         save_market_state(state)
 
         # Send notification ONLY on regime change
-        extra = (
-            f"\nTotal regime changes: {state['regime_changes']}"\
-            f"\nBullish regime changes: {state['bullish_changes']}"\
-            f"\nBearish regime changes: {state['bearish_changes']}"
-        )
-        # Include recent regime changes (last 5)
-        recent_tx = state.get("transactions", [])[-5:]
-        if recent_tx:
-            extra += "\nRecent regime changes:" + "".join([
-                f"\n- {tx['time']}: {tx['detail']}" for tx in recent_tx
-            ])
-        full_message = f"<pre>{html.escape(report_content + extra)}</pre>"
+        full_message = build_regime_message(
+            previous_regime, current_regime, btc_macro, rotation,
+            report_content, state.get("transactions", []))
         print(f"Regime change detected: {change_type}. Sending notification...")
         send_telegram_message(full_message)
     else:

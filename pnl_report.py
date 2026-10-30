@@ -12,7 +12,7 @@ import time
 import secrets
 import urllib.parse
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import jwt
 import requests
@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import serialization
 
 from config import ExecutorConfig
 from core import StateManager, TradeLog, send_telegram_message
+from core.telegram import exit_reason_label, format_usd
 
 SNAPSHOT_FILE = Path(os.environ.get(
     "PNL_SNAPSHOT_FILE",
@@ -99,8 +100,12 @@ def build_report() -> tuple[str, dict]:
     cash = balances["cash"]
     held = balances["crypto"]
 
-    lines = ["<b>Trading Bot PnL Report</b>"]
-    lines.append(f"As of: {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
+    total_pnl = perf.get("total_pnl", 0)
+    now = datetime.now(timezone.utc)
+    lines = [
+        f"\U0001f4ca <b>Daily PnL</b> \u00b7 {format_usd(total_pnl, signed=True)} all-time",
+        now.strftime("%b %d %H:%M UTC"),
+    ]
 
     # --- Since-inception realized performance ---
     total_trades = perf.get("total_trades", 0)
@@ -108,12 +113,11 @@ def build_report() -> tuple[str, dict]:
     pf = perf.get("profit_factor", 0.0)
     pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
     lines.append("")
-    lines.append("<b>Realized (since inception)</b>")
-    lines.append(f"Trades: {total_trades} | Win rate: {win_rate:.0f}%")
-    lines.append(f"Total PnL: ${perf.get('total_pnl', 0):+,.2f} | Profit Factor: {pf_str}")
-    lines.append(
-        f"Avg Win: ${perf.get('avg_win', 0):+,.2f} / Avg Loss: ${perf.get('avg_loss', 0):,.2f}"
-    )
+    lines.append("<b>Realized</b>")
+    lines.append(f"{total_trades} trades \u00b7 {win_rate:.0f}% wins")
+    lines.append(f"Profit factor {pf_str}")
+    lines.append(f"Avg win {format_usd(perf.get('avg_win', 0), signed=True)}")
+    lines.append(f"Avg loss {format_usd(-abs(perf.get('avg_loss', 0)))}")
 
     # --- Open positions: unrealized PnL vs live prices ---
     open_positions = []
@@ -140,15 +144,14 @@ def build_report() -> tuple[str, dict]:
 
     lines.append("")
     if open_positions:
-        lines.append(f"<b>Open Positions</b> (unrealized: ${unrealized_total:+,.2f})")
+        lines.append(f"<b>Open positions</b> \u00b7 {format_usd(unrealized_total, signed=True)}")
         for p in open_positions:
+            pct = f"{p['unrealized_pct']:+.1f}%".replace("-", "\u2212")
             lines.append(
-                f"  {p['asset']}: {p['qty']:.4f} @ ${p['entry']:,.2f} → ${p['current']:,.2f} "
-                f"({'+' if p['unrealized_usd'] >= 0 else ''}${p['unrealized_usd']:,.2f}, "
-                f"{p['unrealized_pct']:+.2f}%)"
+                f"{html.escape(p['asset'])}  {pct} \u00b7 {format_usd(p['unrealized_usd'], signed=True)}"
             )
     else:
-        lines.append("<b>Open Positions</b>: none")
+        lines.append("<b>Open positions</b>: none")
 
     # --- Current portfolio value ---
     total_value = cash["USD"] + cash["USDC"]
@@ -157,25 +160,39 @@ def build_report() -> tuple[str, dict]:
         if price:
             total_value += qty * price
     lines.append("")
-    lines.append(f"<b>Current Portfolio Value</b>: ${total_value:,.2f}")
-    lines.append(f"  Cash: ${cash['USD'] + cash['USDC']:,.2f}")
+    lines.append("<b>Portfolio</b>")
+    lines.append(f"Value {format_usd(total_value, whole=True)}")
+    lines.append(f"Cash {format_usd(cash['USD'] + cash['USDC'], whole=True)}")
+
+    # --- Fees (recorded on SELL rows) ---
+    fees_total = trade_log.total_fees()
+    fees_30d = trade_log.total_fees(since=(now - timedelta(days=30)).replace(tzinfo=None).isoformat())
+    gross_profit = total_pnl + fees_total
+    lines.append("")
+    lines.append("<b>Fees</b>")
+    lines.append(f"Total {format_usd(fees_total)}")
+    lines.append(f"Last 30d {format_usd(fees_30d)}")
+    if fees_total > 0:
+        if gross_profit > 0:
+            lines.append(f"{fees_total / gross_profit * 100:.0f}% of gross profit")
+        else:
+            lines.append("fees > gross profit")
 
     # --- Recent closed trades ---
-    recent = trade_log.query(side="SELL", limit=8)
+    recent = trade_log.query(side="SELL", limit=5)
     if recent:
         lines.append("")
-        lines.append("<b>Recent Closed Trades</b>")
-        for t in recent:
+        lines.append("<b>Recent trades</b>")
+        for t in recent[:5]:
             pnl = t.get("pnl") or 0.0
             lines.append(
-                f"  {t['timestamp']}: {t['asset']} PnL {'+' if pnl >= 0 else ''}${pnl:,.2f} "
-                f"({html.escape(t.get('reason') or '-')})"
+                f"{html.escape(t['asset'])}  {format_usd(pnl, signed=True)} \u00b7 {exit_reason_label(t.get('reason'))}"
             )
 
     report_text = "\n".join(lines)
 
     snapshot = {
-        "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "as_of": now.isoformat(timespec="seconds"),
         "realized": {
             "total_trades": total_trades,
             "win_rate_pct": round(win_rate, 1),
@@ -185,6 +202,14 @@ def build_report() -> tuple[str, dict]:
         "unrealized_usd": unrealized_total,
         "open_positions": open_positions,
         "current_portfolio_value_usd": total_value,
+        "fees": {
+            "total_usd": fees_total,
+            "last_30d_usd": fees_30d,
+            "gross_profit_usd": gross_profit,
+            "share_of_gross_profit_pct": (
+                round(fees_total / gross_profit * 100, 1) if gross_profit > 0 else None
+            ),
+        },
     }
     return report_text, snapshot
 

@@ -18,6 +18,7 @@ from decimal import Decimal
 from config import TradingConfig, ExecutorConfig
 
 # Import core business logic
+from core.telegram import exit_reason_label, exchange_label, format_price, format_usd
 from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager, send_telegram_message, TradeLog, DerivativesDataProvider
 
 # Graceful shutdown
@@ -262,29 +263,31 @@ def is_asset_blacklisted(asset):
 def _notify_buy(ex_id, asset, price, buy_size, regime, candidate):
     rsi = candidate.get("rsi")
     momentum = candidate.get("momentum")
-    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
-    mom_str = f"{momentum:+.1f}%" if momentum is not None else "N/A"
-    msg = (
-        f"<b>BUY {asset}</b>\n"
-        f"Price: ${price:,.2f}\n"
-        f"Size: ${buy_size:,.2f}\n"
-        f"Regime: {regime}\n"
-        f"RSI: {rsi_str} | Momentum: {mom_str}\n"
-        f"Executor: {ex_id}"
-    )
-    send_telegram_message(msg)
+    lines = [
+        f"\U0001f7e2 <b>BUY {html.escape(asset)}</b> \u00b7 {format_usd(buy_size, whole=True)} @ {format_price(price)}",
+        "",
+        f"{exchange_label(ex_id)} \u00b7 {html.escape(str(regime))}",
+    ]
+    stats = []
+    if rsi is not None:
+        stats.append(f"RSI {rsi:.0f}")
+    if momentum is not None:
+        stats.append(f"Mom {momentum:+.1f}%")
+    if stats:
+        lines.append(" \u00b7 ".join(stats))
+    send_telegram_message("\n".join(lines))
 
 
 def _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl):
-    pnl_emoji = "\U0001f4b0" if pnl >= 0 else "\U0001f534"
+    emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+    pct = (exit_price / entry - 1) * 100 if entry else 0.0
+    pct_str = f"{pct:+.1f}%".replace("-", "\u2212")
     msg = (
-        f"<b>SELL {asset}</b> {pnl_emoji}\n"
-        f"Exit: ${exit_price:,.2f}\n"
-        f"Entry: ${entry:,.2f}\n"
-        f"Amount: {sell_amount:.6f}\n"
-        f"PnL: ${pnl:+.2f}\n"
-        f"Reason: {html.escape(reason)}\n"
-        f"Executor: {ex_id}"
+        f"{emoji} <b>SELL {html.escape(asset)}</b> \u00b7 {format_usd(pnl, signed=True)} ({pct_str})\n"
+        f"\n"
+        f"{format_price(entry)} \u2192 {format_price(exit_price)}\n"
+        f"{exit_reason_label(reason)}\n"
+        f"{exchange_label(ex_id)}"
     )
     send_telegram_message(msg)
 
@@ -751,14 +754,19 @@ PERIODIC_STATUS_INTERVAL = 4 * 3600  # 4 hours in seconds
 
 
 def _build_status_message(full_regime, data_provider, aggregate_value, state, derivatives_signals=None):
-    """Build a periodic status summary message."""
-    lines = [f"<b>Status Update</b>", f"Regime: {full_regime}"]
+    """Build a periodic status summary message (phone-friendly HTML)."""
+    lines = [
+        f"\U0001f4ca <b>Status</b> \u00b7 {format_usd(aggregate_value, whole=True)}",
+        "",
+        f"Regime: {html.escape(str(full_regime))}",
+    ]
 
     if derivatives_signals and derivatives_signals.funding:
         f = derivatives_signals.funding
-        lines.append(f"Funding: {f.avg_rate*100:.4f}% ({f.signal}) | Pos modifier: {derivatives_signals.position_modifier:.2f}x")
+        lines.append(f"Funding {f.avg_rate*100:.3f}% ({html.escape(str(f.signal))})")
+        lines.append(f"Size modifier {derivatives_signals.position_modifier:.2f}x")
         for flag in derivatives_signals.caution_flags:
-            lines.append(f"  * {flag}")
+            lines.append(f"\u26a0\ufe0f {html.escape(str(flag))}")
 
     # Price + indicator info for each supported asset
     for asset in ["BTC", "ETH"]:
@@ -773,34 +781,40 @@ def _build_status_message(full_regime, data_provider, aggregate_value, state, de
             rsi = calculate_rsi(df) if df is not None else None
             momentum = get_momentum_ranking(df) if df is not None else None
 
-            line = f"\n<b>{asset}</b>: ${price:,.0f}"
+            lines.append("")
+            lines.append(f"<b>{asset}</b> {format_usd(price, whole=True)}")
             if ma_s and ma_l:
-                line += f" | MA{SHORT_WINDOW}: ${ma_s:,.0f} | MA{LONG_WINDOW}: ${ma_l:,.0f}"
+                trend = "up" if ma_s > ma_l else "down"
+                lines.append(f"Trend {trend} (MA{SHORT_WINDOW}/{LONG_WINDOW})")
+            stats = []
             if rsi is not None:
-                line += f" | RSI: {rsi:.0f}"
+                stats.append(f"RSI {rsi:.0f}")
             if momentum is not None:
-                line += f" | Mom: {momentum:+.1f}%"
-            lines.append(line)
+                stats.append(f"Mom {momentum:+.1f}%")
+            if stats:
+                lines.append(" \u00b7 ".join(stats))
         except Exception:
             pass
-
-    lines.append(f"\nPortfolio: ${aggregate_value:,.2f}")
 
     # Open positions
     entry_prices = state.get("entry_prices", {})
     if entry_prices:
-        lines.append("\n<b>Open Positions:</b>")
+        lines.append("")
+        lines.append("<b>Open positions</b>")
         for key, entry in entry_prices.items():
-            asset_sym = key.split(":")[-1].split("-")[0]
+            asset_sym = html.escape(key.split(":")[-1].split("-")[0])
             try:
-                pd_id = get_data_product_id(asset_sym)
+                pd_id = get_data_product_id(key.split(":")[-1].split("-")[0])
                 pd_data = data_provider.get_product_details(pd_id)
                 if pd_data:
                     cur_price = float(pd_data['price'])
                     upnl = (cur_price - entry) / entry * 100
-                    lines.append(f"  {asset_sym}: entry=${entry:,.2f} now=${cur_price:,.2f} ({upnl:+.1f}%)")
+                    upnl_str = f"{upnl:+.1f}%".replace("-", "\u2212")
+                    lines.append(f"{asset_sym}  {upnl_str} \u00b7 {format_price(entry)} \u2192 {format_price(cur_price)}")
+                    continue
             except Exception:
-                lines.append(f"  {asset_sym}: entry=${entry:,.2f}")
+                pass
+            lines.append(f"{asset_sym}  entry {format_price(entry)}")
 
     return "\n".join(lines)
 

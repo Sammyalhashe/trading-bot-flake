@@ -172,6 +172,22 @@ class TradeLog:
                     "total_pnl": 0.0, "win_rate": 0.0,
                     "avg_win": 0.0, "avg_loss": 0.0}
 
+    def total_fees(self, since: Optional[str] = None) -> float:
+        """Sum of fees recorded on SELL trades, optionally since a timestamp."""
+        try:
+            conn = self._connect()
+            sql = "SELECT COALESCE(SUM(fee), 0) FROM trades WHERE side = 'SELL'"
+            params = []
+            if since:
+                sql += " AND timestamp >= ?"
+                params.append(since)
+            total = conn.execute(sql, params).fetchone()[0]
+            conn.close()
+            return float(total)
+        except Exception as e:
+            logging.error(f"TradeLog: total_fees failed: {e}")
+            return 0.0
+
     @staticmethod
     def format_table(rows: List[Dict[str, Any]]) -> str:
         """Pretty-print rows as an aligned text table."""
