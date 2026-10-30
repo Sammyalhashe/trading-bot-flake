@@ -197,6 +197,21 @@ def clear_entry_price(executor_id, product_id):
         state_manager.lock_file = STATE_FILE.with_suffix('.lock')
     return state_manager.clear_entry_price(executor_id, product_id)
 
+def record_stopout(executor_id, product_id):
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.record_stopout(executor_id, product_id)
+
+def get_cooldown_remaining_hours(executor_id, product_id):
+    # Update state_manager's state_file in case STATE_FILE was patched (for tests)
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager.get_cooldown_remaining_hours(
+        executor_id, product_id, float(config.stopout_cooldown_hours))
+
 def load_peak_value(executor_id="default"):
     """Wrapper for backward compatibility"""
     if state_manager.state_file != STATE_FILE:
@@ -453,6 +468,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     for candidate in asset_candidates[:TOP_MOMENTUM_COUNT]:
         asset, product_id = candidate["asset"], candidate["product_id"]
         already_holds = held_total.get(asset, 0) > 0
+        cooldown_left = get_cooldown_remaining_hours(ex_id, product_id)
+        if cooldown_left > 0:
+            logging.info(f"[{ex_id}] Skipping {asset}: stop-out cooldown active "
+                         f"({cooldown_left:.1f}h of {config.stopout_cooldown_hours:g}h remaining)")
+            continue
         if current_positions >= max_positions and not already_holds:
             logging.info(f"[{ex_id}] Skipping {asset}: at max concurrent positions ({current_positions}/{max_positions})")
             continue
@@ -682,8 +702,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                             price=exit_price, quantity=sell_amount,
                             entry_price=entry, pnl=pnl, fee=fee_cost,
                             reason=reason, market_regime=full_regime, hwm=hwm)
+                    if is_stop_loss:
+                        record_stopout(ex_id, product_id)
                     if sell_ratio == 1.0:
                         clear_entry_price(ex_id, product_id)
+                        state = load_state()
                     else:
                         # Partial sell — save updated TP flags (already saved above)
                         pass
@@ -1108,6 +1131,10 @@ def run_ws_mode():
                     pnl = (exit_price - entry) * sell_amount - fee_cost
                     record_trade(pnl > 0, pnl)
                     logging.info(f"[WS] PnL: ${pnl:+.2f}")
+                if is_stop_loss:
+                    record_stopout("CoinbaseExecutor", product_id)
+                    with _state_lock:
+                        _state_cache.setdefault("stopout_timestamps", {})[entry_key] = time.time()
                 if sell_ratio == 1.0:
                     clear_entry_price("CoinbaseExecutor", product_id)
                     with _state_lock:

@@ -202,8 +202,9 @@ class TrendFollowingStrategy:
         elif True:
             atr = self.ta.calculate_atr(df)
             if atr is not None and price > 0:
-                atr_stop = 2.5 * atr / price
-                atr_stop = max(0.03, min(0.15, atr_stop))
+                atr_stop = float(self.config.atr_stop_multiplier) * atr / price
+                atr_stop = max(float(self.config.atr_stop_min_pct),
+                               min(float(self.config.atr_stop_max_pct), atr_stop))
                 effective_trailing_stop = atr_stop
             else:
                 effective_trailing_stop = trailing_stop

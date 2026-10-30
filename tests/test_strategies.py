@@ -607,3 +607,38 @@ class TestMTFTrendStrategy:
     def test_allows_bull_regime(self):
         s = self._make_strategy()
         assert s.should_skip_regime("BULL", "BULL") is False
+
+
+# ===== TrendFollowing configurable ATR stop =====
+
+class TestTrendFollowingAtrStop:
+    """Flat candles have ATR = 2% of price, so stop% = multiplier * 2% before clamping."""
+
+    def _exit(self, price, hwm=100.0, entry=100.0, tp_flags=None, **overrides):
+        import dataclasses
+        from strategies.trend_following import TrendFollowingStrategy
+        config = dataclasses.replace(default_config(), **overrides)
+        s = TrendFollowingStrategy(make_ta(), config)
+        df = make_candle_df(100.0)
+        sell, ratio, reason, _ = s.check_exit(
+            "BTC", "BTC-USDC", {"1h": df}, price, entry, hwm, tp_flags or {}, {}, "k")
+        return sell, reason
+
+    def test_multiplier_widens_stop(self):
+        assert self._exit(94.0, atr_stop_multiplier=2.5, atr_stop_min_pct=0.03)[0] is True
+        assert self._exit(94.0, atr_stop_multiplier=4.5, atr_stop_min_pct=0.03)[0] is False
+
+    def test_floor_overrides_small_atr_stop(self):
+        assert self._exit(95.0, atr_stop_multiplier=1.0, atr_stop_min_pct=0.06)[0] is False
+        assert self._exit(93.0, atr_stop_multiplier=1.0, atr_stop_min_pct=0.06)[0] is True
+
+    def test_ceiling_caps_large_atr_stop(self):
+        assert self._exit(91.0, atr_stop_multiplier=10.0, atr_stop_max_pct=0.10)[0] is False
+        assert self._exit(89.0, atr_stop_multiplier=10.0, atr_stop_max_pct=0.10)[0] is True
+
+    def test_breakeven_after_tp1_still_applies(self):
+        wide = dict(atr_stop_multiplier=4.5, atr_stop_min_pct=0.03)
+        assert self._exit(98.0, hwm=103.0, **wide)[0] is False
+        sell, reason = self._exit(98.0, hwm=103.0, tp_flags={"tp1_hit": True}, **wide)
+        assert sell is True
+        assert "[breakeven]" in reason

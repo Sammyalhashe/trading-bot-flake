@@ -31,6 +31,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+CANDLE_LOOKBACK = 300  # indicators need at most ~55 candles; avoids copying full history each bar
+
+
 class BacktestEngine:
     """Backtesting engine for trading strategies."""
 
@@ -42,6 +45,7 @@ class BacktestEngine:
         self.trades = []
         self.equity_curve = []
         self.total_fees = 0  # Track total fees paid
+        self.stopout_times = {}  # asset -> timestamp of last stop-loss exit
         self.ta = TechnicalAnalysis(
             ma_short_window=config.ma_short_window,
             ma_long_window=config.ma_long_window
@@ -98,13 +102,15 @@ class BacktestEngine:
                 total += pos['size'] * prices[asset]
         return total
 
-    def run_backtest(self, data_files: List[str], strategy_name: str = "auto") -> Dict:
+    def run_backtest(self, data_files: List[str], strategy_name: str = "auto",
+                     start=None, end=None) -> Dict:
         """
         Run backtest on historical data.
 
         Args:
             data_files: List of CSV file paths
             strategy_name: 'mean_reversion', 'trend_following', or 'auto'
+            start, end: optional inclusive timestamp bounds (anything pd.Timestamp accepts)
         """
         logger.info(f"Starting backtest with strategy: {strategy_name}")
         logger.info(f"Initial capital: ${self.initial_capital:,.2f}")
@@ -115,6 +121,11 @@ class BacktestEngine:
             path = Path(file_path)
             asset = path.stem.split('_')[0].replace('_', '-')  # BTC_USD -> BTC-USD
             datasets[asset] = self.load_data(file_path)
+            if start is not None:
+                datasets[asset] = datasets[asset][datasets[asset]['timestamp'] >= pd.Timestamp(start)]
+            if end is not None:
+                datasets[asset] = datasets[asset][datasets[asset]['timestamp'] <= pd.Timestamp(end)]
+            datasets[asset] = datasets[asset].reset_index(drop=True)
             logger.info(f"Loaded {len(datasets[asset])} candles for {asset}")
 
         if not datasets:
@@ -146,7 +157,8 @@ class BacktestEngine:
 
             for asset, df in datasets.items():
                 # Find matching timestamp (or closest)
-                asset_df = df[df['timestamp'] <= timestamp]
+                end = df['timestamp'].searchsorted(timestamp, side='right')
+                asset_df = df.iloc[max(0, end - CANDLE_LOOKBACK):end]
                 if len(asset_df) > 0:
                     current_prices[asset] = asset_df.iloc[-1]['close']
                     current_dfs[asset] = asset_df
@@ -247,6 +259,13 @@ class BacktestEngine:
                 pos['tp_flags'] = new_tp_flags
                 self._close_position(asset, price, sell_ratio, reason, timestamp)
 
+    def _in_stopout_cooldown(self, asset: str, timestamp) -> bool:
+        cooldown_hours = float(self.config.stopout_cooldown_hours)
+        stopped_at = self.stopout_times.get(asset)
+        if cooldown_hours <= 0 or stopped_at is None:
+            return False
+        return (timestamp - stopped_at).total_seconds() < cooldown_hours * 3600
+
     def _check_entries(self, strategy, prices: Dict[str, float],
                       dfs: Dict[str, pd.DataFrame], market_regime: str,
                       full_regime: str, timestamp):
@@ -267,6 +286,9 @@ class BacktestEngine:
                 continue  # Already have position
 
             if asset not in prices:
+                continue
+
+            if self._in_stopout_cooldown(asset, timestamp):
                 continue
 
             market_data = self._build_market_data(strategy, df)
@@ -376,6 +398,9 @@ class BacktestEngine:
         logger.info(f"{timestamp} | SELL {asset} @ ${price:,.2f} | Size: {sell_size:.6f} | "
                    f"Proceeds: ${proceeds:,.2f} | Fee: ${sell_fee:,.2f} | "
                    f"Net P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%) | {reason}")
+
+        if "stop" in reason.lower():
+            self.stopout_times[asset] = timestamp
 
         # Remove position if fully closed
         if pos['size'] < 1e-8:

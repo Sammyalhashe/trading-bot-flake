@@ -40,7 +40,8 @@ class StateManager:
             "high_water_marks": {},
             "take_profit_flags": {},
             "short_close_failures": {},
-            "entry_timestamps": {}
+            "entry_timestamps": {},
+            "stopout_timestamps": {}
         }
         lock_fd = self._acquire_lock()
         try:
@@ -53,6 +54,7 @@ class StateManager:
                     state.setdefault("take_profit_flags", {})
                     state.setdefault("short_close_failures", {})
                     state.setdefault("entry_timestamps", {})
+                    state.setdefault("stopout_timestamps", {})
                     return state
                 except Exception as e:
                     logger.error(f"Failed to load state: {e}")
@@ -123,6 +125,23 @@ class StateManager:
         if key in state.get("entry_timestamps", {}):
             del state["entry_timestamps"][key]
         self.save_state(state)
+
+    def record_stopout(self, executor_id: str, product_id: str) -> None:
+        """Remember when a stop-loss exit happened so re-entry can be delayed"""
+        state = self.load_state()
+        state.setdefault("stopout_timestamps", {})[f"{executor_id}:{product_id}"] = time.time()
+        self.save_state(state)
+
+    def get_cooldown_remaining_hours(
+        self, executor_id: str, product_id: str, cooldown_hours: float
+    ) -> float:
+        """Hours left before re-entry is allowed after a stop-out (0.0 if none)"""
+        if cooldown_hours <= 0:
+            return 0.0
+        stopped_at = self.load_state().get("stopout_timestamps", {}).get(f"{executor_id}:{product_id}")
+        if stopped_at is None:
+            return 0.0
+        return max(0.0, cooldown_hours - (time.time() - stopped_at) / 3600)
 
     def load_peak_value(self, executor_id: str = "default") -> float:
         """Load peak portfolio value for drawdown tracking"""

@@ -507,3 +507,95 @@ class TestEthereumExecutor:
         from executors.ethereum_executor import EthereumExecutor
         sig = inspect.signature(EthereumExecutor.execute_swap)
         assert 'fee' not in sig.parameters
+
+
+# ===== Test Stop-Out Cooldown =====
+
+def _sell_calls(mock_executor):
+    return [c for c in mock_executor.place_limit_order.call_args_list + mock_executor.place_aggressive_limit_order.call_args_list
+            if c[0][1] == 'SELL']
+
+
+def _buy_calls(mock_executor):
+    return [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'BUY']
+
+
+def _arrange_buyable_btc(mock_data_provider):
+    prices, p = [], 100.0
+    for i in range(60):
+        p += -0.15 if i % 2 == 1 else 0.25
+        prices.append(p)
+    mock_data_provider.get_market_data.return_value = make_candle_df(prices, volumes=[200000.0] * 60)
+    mock_data_provider.get_product_details.return_value = {
+        "price": str(prices[-1]), "quote_increment": "0.01", "base_increment": "0.001",
+    }
+
+
+def _hold_btc_at_price(mock_executor, mock_data_provider, entry, price):
+    import trading_bot
+    mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+    mock_data_provider.get_product_details.return_value = {
+        "price": str(price), "quote_increment": "0.01", "base_increment": "0.001",
+    }
+    trading_bot.update_entry_price("TestExecutor", "BTC-USDC", entry)
+    trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+
+class TestStopOutCooldown:
+    KEY = "TestExecutor:BTC-USDC"
+
+    def test_stop_loss_exit_records_cooldown(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        _hold_btc_at_price(mock_executor, mock_data_provider, entry=200.0, price=150.0)
+        assert _sell_calls(mock_executor), "price far below HWM should stop out"
+        stopouts = trading_bot.load_state()["stopout_timestamps"]
+        assert abs(stopouts[self.KEY] - time.time()) < 5
+
+    def test_take_profit_exit_does_not_record_cooldown(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        _hold_btc_at_price(mock_executor, mock_data_provider, entry=100.0, price=120.0)
+        assert _sell_calls(mock_executor), "TP1 should have sold"
+        assert trading_bot.load_state()["stopout_timestamps"] == {}
+
+    def test_entry_skipped_within_cooldown(self, temp_state_file, mock_executor, mock_data_provider, caplog):
+        import trading_bot
+        _arrange_buyable_btc(mock_data_provider)
+        trading_bot.record_stopout("TestExecutor", "BTC-USDC")
+        with patch.object(trading_bot.config, "stopout_cooldown_hours", 24.0), caplog.at_level("INFO"):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+        assert not _buy_calls(mock_executor)
+        assert "Skipping BTC: stop-out cooldown active" in caplog.text
+
+    def test_entry_allowed_after_cooldown_expires(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        _arrange_buyable_btc(mock_data_provider)
+        trading_bot.record_stopout("TestExecutor", "BTC-USDC")
+        state = trading_bot.load_state()
+        state["stopout_timestamps"][self.KEY] = time.time() - 25 * 3600
+        trading_bot.save_state(state)
+        with patch.object(trading_bot.config, "stopout_cooldown_hours", 24.0):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+        assert _buy_calls(mock_executor)
+
+    def test_zero_cooldown_disables_block(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        _arrange_buyable_btc(mock_data_provider)
+        trading_bot.record_stopout("TestExecutor", "BTC-USDC")
+        with patch.object(trading_bot.config, "stopout_cooldown_hours", 0.0):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+        assert _buy_calls(mock_executor)
+
+    def test_cooldown_is_per_executor(self, temp_state_file):
+        import trading_bot
+        trading_bot.record_stopout("TestExecutor", "BTC-USDC")
+        with patch.object(trading_bot.config, "stopout_cooldown_hours", 24.0):
+            assert trading_bot.get_cooldown_remaining_hours("TestExecutor", "BTC-USDC") > 0
+            assert trading_bot.get_cooldown_remaining_hours("OtherExecutor", "BTC-USDC") == 0.0
+
+    def test_cooldown_survives_state_reload(self, temp_state_file):
+        import trading_bot
+        from core.state_manager import StateManager
+        trading_bot.record_stopout("TestExecutor", "BTC-USDC")
+        reloaded = StateManager(temp_state_file)
+        remaining = reloaded.get_cooldown_remaining_hours("TestExecutor", "BTC-USDC", 12.0)
+        assert 11.9 < remaining <= 12.0

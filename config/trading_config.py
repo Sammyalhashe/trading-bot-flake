@@ -39,6 +39,10 @@ class TradingConfig:
     rsi_overbought_neutral: Decimal
     rsi_overbought_bear: Decimal
     trailing_stop_pct: Decimal
+    atr_stop_multiplier: float
+    atr_stop_min_pct: float
+    atr_stop_max_pct: float
+    stopout_cooldown_hours: float
     min_24h_volume_usd: Decimal
     volume_spike_rsi_bonus: float
     volume_spike_threshold: float
@@ -126,6 +130,10 @@ class TradingConfig:
             rsi_overbought_neutral=Decimal(os.getenv("RSI_OVERBOUGHT_NEUTRAL", "75")),
             rsi_overbought_bear=Decimal(os.getenv("RSI_OVERBOUGHT_BEAR", "70")),
             trailing_stop_pct=Decimal(os.getenv("TRAILING_STOP_PCT", "0.07")),
+            atr_stop_multiplier=float(os.getenv("ATR_STOP_MULTIPLIER", "2.5")),
+            atr_stop_min_pct=float(os.getenv("ATR_STOP_MIN_PCT", "0.06")),
+            atr_stop_max_pct=float(os.getenv("ATR_STOP_MAX_PCT", "0.15")),
+            stopout_cooldown_hours=float(os.getenv("STOPOUT_COOLDOWN_HOURS", "12")),
             min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
             volume_spike_rsi_bonus=float(os.getenv("VOLUME_SPIKE_RSI_BONUS", "5")),
             volume_spike_threshold=float(os.getenv("VOLUME_SPIKE_THRESHOLD", "2.0")),
@@ -212,6 +220,15 @@ class TradingConfig:
         # Percentage validations
         if not (0 <= self.trailing_stop_pct <= 1):
             errors.append(f"Trailing stop ({self.trailing_stop_pct}) must be between 0 and 1")
+
+        if not (0 < self.atr_stop_min_pct <= self.atr_stop_max_pct <= 1):
+            errors.append(f"ATR stop bounds must satisfy 0 < min ({self.atr_stop_min_pct}) <= max ({self.atr_stop_max_pct}) <= 1")
+
+        if self.atr_stop_multiplier <= 0:
+            errors.append(f"ATR stop multiplier ({self.atr_stop_multiplier}) must be positive")
+
+        if self.stopout_cooldown_hours < 0:
+            errors.append(f"Stop-out cooldown ({self.stopout_cooldown_hours}) must be >= 0")
 
         if not (0 < self.take_profit_1_pct <= 1):
             errors.append(f"Take profit 1 ({self.take_profit_1_pct}) must be between 0 and 1")
