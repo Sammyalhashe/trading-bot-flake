@@ -319,12 +319,12 @@ class CoinbaseExecutor:
         # - POL (MATIC): Ethereum scaling
         # - UNI, AAVE, INJ: DeFi protocols
         # - ONDO: Real World Assets (RWA)
-        # - TAO, RENDER, FET: AI / DePIN compute
+        # - TAO, RENDER, FET, VVV: AI / DePIN compute (VVV: Venice private AI inference)
         # - TIA: Modular / data availability
         # - XRP, LTC: Payments / large-cap store-of-value
         # - HBAR: Enterprise DLT
         # (APT omitted: ~$260k 24h volume, below the 500k floor — revisit later.)
         return [
             "BTC", "ETH", "SOL", "AVAX", "SUI", "LINK", "POL", "UNI", "AAVE", "ONDO", "TAO",
-            "XRP", "LTC", "HBAR", "NEAR", "TIA", "INJ", "RENDER", "FET",
+            "XRP", "LTC", "HBAR", "NEAR", "TIA", "INJ", "RENDER", "FET", "VVV",
         ]
