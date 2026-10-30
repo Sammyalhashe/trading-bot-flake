@@ -94,3 +94,17 @@ def test_regime_alert_escapes_report_content(tmp_path):
     msg = send.call_args[0][0]
     assert msg.startswith("<pre>") and msg.endswith("</pre>")
     assert "MA21 &lt; MA55 &amp; falling" in msg
+
+
+def test_extract_market_status_ignores_banner_decoration():
+    import notify_telegram
+    plain = notify_telegram.extract_market_status("Market Regime: STRONG_BEAR")
+    banner = notify_telegram.extract_market_status("━━━ Market Regime: STRONG_BEAR ━━━")
+    assert plain[0] == banner[0] == "STRONG_BEAR"
+
+
+def test_extract_market_status_dual_signal_format():
+    import notify_telegram
+    regime, btc, rotation = notify_telegram.extract_market_status(
+        "Market Regime: STRONG_BULL (BTC: BULL | Rotation: ETH_LEADING)")
+    assert (regime, btc, rotation) == ("STRONG_BULL", "BULL", "ETH_LEADING")

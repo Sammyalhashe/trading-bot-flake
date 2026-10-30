@@ -91,8 +91,9 @@ def extract_market_status(report):
 
                 return (regime, btc_macro, rotation)
             else:
-                # Single-asset or legacy format - just the regime
-                return (content, None, None)
+                # Single-asset or legacy format. Keep only the regime word: the
+                # bot's banner line appends "━━━", which would read as a change.
+                return (content.split()[0] if content else content, None, None)
 
     return ("Unknown", None, None)
 
