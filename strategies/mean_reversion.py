@@ -63,7 +63,7 @@ class MeanReversionStrategy:
 
     def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
-                   state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+                   state: dict, entry_key: str, round_trip_fee_pct=None) -> tuple[bool, float, str, dict]:
         df = market_data["1h"]
         bb_period = self.config.mr_bollinger_period
         stop_pct = float(self.config.mr_trailing_stop_pct)

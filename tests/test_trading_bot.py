@@ -8,6 +8,7 @@ import tempfile
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from decimal import Decimal
 
 # Add parent dir to path to import trading_bot
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -399,6 +400,78 @@ class TestFeeAwarePnL:
         expected_pnl = (exit_price - entry) * sell_amount - fee_cost
         # $10 gross - $0.60 fee = $9.40
         assert abs(expected_pnl - 9.40) < 0.01
+
+
+class TestPerExecutorFee:
+    def test_calculate_fees_prefers_explicit_rate(self):
+        import trading_bot
+        rm = trading_bot.risk_manager
+
+        assert rm.calculate_fees(1000.0, is_round_trip=True, round_trip_fee_pct=Decimal("0.006")) == pytest.approx(6.0)
+        assert rm.calculate_fees(1000.0, is_round_trip=False, round_trip_fee_pct=Decimal("0.006")) == pytest.approx(3.0)
+        assert rm.calculate_fees(1000.0) == pytest.approx(1000.0 * float(trading_bot.config.round_trip_fee_pct))
+
+    def test_executor_without_numeric_fee_uses_global(self):
+        import trading_bot
+
+        assert trading_bot._executor_round_trip_fee(MagicMock()) is None
+        assert trading_bot._executor_round_trip_fee(object()) is None
+        assert trading_bot._executor_round_trip_fee(MagicMock(round_trip_fee_pct=Decimal("0.006"))) == Decimal("0.006")
+
+    @pytest.mark.parametrize("fee", [True, False, float("nan"), Decimal("NaN"), float("inf"), -0.01, "0.006"])
+    def test_executor_fee_rejects_non_finite_or_bogus_values(self, fee):
+        import trading_bot
+
+        assert trading_bot._executor_round_trip_fee(MagicMock(round_trip_fee_pct=fee)) is None
+
+    def test_recorded_pnl_uses_executor_fee(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        del mock_executor.place_aggressive_limit_order
+        mock_executor.round_trip_fee_pct = Decimal("0.006")
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        mock_data_provider.get_product_details.return_value = {
+            "price": "150.0", "quote_increment": "0.01", "base_increment": "0.001",
+        }
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 200.0)
+
+        with patch.object(trading_bot, "record_trade") as record:
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+        pnl = record.call_args.args[1]
+        assert pnl == pytest.approx((150.0 - 200.0) - 200.0 * 0.006)
+        assert pnl != pytest.approx((150.0 - 200.0) - 200.0 * float(trading_bot.config.round_trip_fee_pct))
+
+    def test_onchain_fee_floor_defers_trend_exit(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        mock_executor.round_trip_fee_pct = Decimal("0.006")
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        mock_data_provider.get_market_data.return_value = make_bearish_df()
+        mock_data_provider.get_product_details.return_value = {
+            "price": "150.0", "quote_increment": "0.01", "base_increment": "0.001",
+        }
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 149.0)
+
+        with patch.object(trading_bot, "strategy", trading_bot._strategies["trend_following"]):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+        sells = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
+        assert sells == []
+
+    def test_sell_pnl_uses_executor_fee(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        del mock_executor.place_aggressive_limit_order
+        mock_executor.round_trip_fee_pct = Decimal("0.006")
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        mock_data_provider.get_product_details.return_value = {
+            "price": "150.0", "quote_increment": "0.01", "base_increment": "0.001",
+        }
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 200.0)
+
+        with patch.object(trading_bot.risk_manager, "calculate_fees", wraps=trading_bot.risk_manager.calculate_fees) as fees:
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+        assert fees.call_args_list, "the stop-loss sell should have been costed"
+        assert all(c.kwargs.get("round_trip_fee_pct") == Decimal("0.006") for c in fees.call_args_list)
 
 
 # ===== Test Bear Market Filter =====

@@ -247,6 +247,32 @@ class TestTrendFollowingStrategy:
         assert "Trend-exit" in reason
         assert flags["trend_exit_hit"] is True
 
+    @pytest.mark.parametrize("price, fee, sells", [
+        (151.0, None, True),
+        (151.0, Decimal("0.001"), True),
+        (1000.0 * 1.0089, Decimal("0.006"), False),
+        (1000.0 * 1.0091, Decimal("0.006"), True),
+    ])
+    def test_trend_exit_fee_floor_boundary(self, price, fee, sells):
+        s = self._make_strategy()
+        entry = 150.0 if price == 151.0 else 1000.0
+        tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+
+        sell, _, _, _ = s.check_exit("BTC", "BTC-USDC", {"1h": make_bearish_df()}, price, entry, price,
+                                     tp_flags, {}, "k", round_trip_fee_pct=fee)
+
+        assert sell is sells
+
+    def test_trend_exit_fee_floor_uses_executor_fee(self):
+        s = self._make_strategy()
+        tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+
+        sell, _, _, flags = s.check_exit("BTC", "BTC-USDC", {"1h": make_bearish_df()}, 151.0, 150.0, 151.0,
+                                         tp_flags, {}, "k", round_trip_fee_pct=Decimal("0.006"))
+
+        assert sell is False
+        assert flags["trend_exit_hit"] is False
+
 
 # ===== MeanReversionStrategy =====
 
@@ -351,6 +377,20 @@ class TestMeanReversionStrategy:
 
 
 # ===== Strategy Factory =====
+
+class TestExecutorFeeKeyword:
+    @pytest.mark.parametrize("name", ["trend_following", "mean_reversion", "supertrend", "mtf_trend"])
+    def test_every_strategy_accepts_round_trip_fee_pct(self, name):
+        from strategies import create_strategy
+        s = create_strategy(name, make_ta(), default_config())
+        market_data = {"1h": make_bearish_df(num_rows=250), "15m": make_candle_df(100.0, num_rows=60)}
+        tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+
+        result = s.check_exit("BTC", "BTC-USDC", market_data, 100.0, 100.0, 100.0, tp_flags, {}, "k",
+                              round_trip_fee_pct=Decimal("0.006"))
+
+        assert len(result) == 4
+
 
 class TestStrategyFactory:
     def test_create_trend_following(self):
@@ -582,6 +622,18 @@ class TestMTFTrendStrategy:
         assert sell is True
         assert ratio == 1.0
         assert "trailing stop" in reason.lower()
+
+    def test_4h_reversal_fee_floor_uses_executor_fee(self):
+        s = self._make_strategy()
+        market_data = {"1h": make_bearish_df(num_rows=250), "15m": make_candle_df(151.0, num_rows=60)}
+
+        def exit_with(fee):
+            tp_flags = {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False}
+            return s.check_exit("BTC", "BTC-USDC", market_data, 151.0, 150.0, 151.0, tp_flags, {}, "k",
+                                round_trip_fee_pct=fee)[0]
+
+        assert exit_with(None) is True
+        assert exit_with(Decimal("0.006")) is False
 
     def test_resample_to_4h(self):
         from strategies.mtf_trend import resample_to_4h

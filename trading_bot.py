@@ -361,6 +361,14 @@ def is_crossover_confirmed(df, direction="bull"):
     """Wrapper for backward compatibility"""
     return technical_analysis.is_crossover_confirmed(df, direction)
 
+def _executor_round_trip_fee(executor):
+    """The executor's own round-trip fee rate (e.g. on-chain), or None to use the global config."""
+    fee = getattr(executor, "round_trip_fee_pct", None)
+    if isinstance(fee, bool) or not isinstance(fee, (int, float, Decimal)):
+        return None
+    return fee if Decimal(str(fee)).is_finite() and fee >= 0 else None
+
+
 def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False, derivatives_signals=None):
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
@@ -656,7 +664,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             tp_flags = state.get("take_profit_flags", {}).get(entry_key, {"tp1_hit": False, "tp2_hit": False, "trend_exit_hit": False})
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
-                asset, product_id, market_data, price, entry, hwm, tp_flags, state, entry_key
+                asset, product_id, market_data, price, entry, hwm, tp_flags, state, entry_key,
+                round_trip_fee_pct=_executor_round_trip_fee(executor)
             )
 
             # Persist updated tp_flags if they changed
@@ -722,10 +731,12 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                     if entry:
                         if actual_sell_fee is not None:
                             # Actual sell fee from API; estimate buy-side fee (not tracked at buy time)
-                            buy_fee_est = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=False)
+                            buy_fee_est = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=False,
+                                                                      round_trip_fee_pct=_executor_round_trip_fee(executor))
                             fee_cost = buy_fee_est + actual_sell_fee
                         else:
-                            fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
+                            fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True,
+                                                                   round_trip_fee_pct=_executor_round_trip_fee(executor))
                         pnl = (exit_price - entry) * sell_amount - fee_cost
                         is_win = pnl > 0
                         record_trade(is_win, pnl)
@@ -869,6 +880,7 @@ def _run_bot(reset_to_usdc=False):
         if rpc_url and private_key:
             try:
                 eth_executor = EthereumExecutor(rpc_url, private_key, TRADING_MODE)
+                eth_executor.warn_about_stranded_tokens()
                 active_executors.append(eth_executor)
             except Exception as e: logging.error(f"Failed to init EthereumExecutor: {e}")
 

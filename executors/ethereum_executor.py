@@ -1,4 +1,13 @@
-"""On-chain executor for Base mainnet, swapping through Aerodrome (Solidly-style v2 AMM).
+"""On-chain executor for Base mainnet, swapping through Aerodrome (Solidly-style v2 AMM) or the
+0x Swap API v2 (AllowanceHolder flow).
+
+Routers (ONCHAIN_ROUTER):
+  aerodrome  (default) Router.swapExactTokensForTokens with an on-chain quote.
+  zerox      0x is an off-chain quote source only. Responses must carry a valid 0x Ed25519
+             signature, target the pinned AllowanceHolder, and exec() into the Settler that the
+             on-chain registry names; approvals are for the exact sell amount. Tokens outside
+             TOKENS are refused. On any 0x failure buys are refused; sells into USDC (exits) fall
+             back to the Aerodrome path with all of its guards.
 
 RPC trust model:
   * Trusted RPC (``trusted_rpc_url`` arg, else ``BASE_TRUSTED_RPC_URL``, else the primary
@@ -18,6 +27,12 @@ Safety knobs (env):
   ONCHAIN_KILL_SWITCH_FILE     if this file exists, all live swaps are disabled
                                (default $XDG_STATE_HOME/trading-bot/onchain_kill_switch)
                                Both are re-checked immediately before every signature.
+  ONCHAIN_ROUTER               aerodrome | zerox (default aerodrome)
+  ONCHAIN_ROUND_TRIP_FEE_PCT   round-trip cost used for this executor's fee floor and PnL
+                               (default 0.006: pool fees + 0x fee + slippage, conservative)
+  ZEROX_API_KEY                0x API key (zerox router)
+  ZEROX_MAX_QUOTE_AGE_BLOCKS   refuse a 0x quote sampled more than this many blocks ago (default 3)
+  ZEROX_SIGNING_KEY_ID / ZEROX_SIGNING_KEY_X  trusted 0x response-signing key (see zerox_client)
 """
 import logging
 import os
@@ -25,8 +40,12 @@ import threading
 import time
 from decimal import Decimal
 
+from eth_abi import decode as abi_decode
+from eth_abi.exceptions import DecodingError
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
+
+from .zerox_client import ZeroExClient, ZeroExError
 
 EXPECTED_CHAIN_ID = 8453  # Base Mainnet
 
@@ -80,16 +99,34 @@ AERODROME_ROUTER_ABI = [
     }
 ]
 
-# Base Token Registry
+# Pinned per the 0x-settler README (Cancun chains incl. Base). Settler itself is never pinned:
+# it is read from the registry's taker-submitted feature before every swap.
+ALLOWANCE_HOLDER_ADDRESS = "0x0000000000001fF3684f28c67538d4D072C22734"
+ALLOWANCE_HOLDER_EXEC_SELECTOR = "0x2213bc0b"  # exec(address,address,uint256,address,bytes)
+# ISettlerTakerSubmitted.execute(AllowedSlippage(recipient, buyToken, minAmountOut), bytes[] actions, bytes32)
+SETTLER_EXECUTE_SELECTOR = "0x1fff991f"
+SETTLER_REGISTRY_ADDRESS = "0x00000000000004533Fe15556B1E086BB1A72cEae"
+SETTLER_TAKER_SUBMITTED_FEATURE = 2
+SETTLER_REGISTRY_ABI = [
+    {"inputs": [{"name": "tokenId", "type": "uint256"}], "name": "ownerOf", "outputs": [{"name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
+    {"inputs": [{"name": "featureId", "type": "uint128"}], "name": "prev", "outputs": [{"name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
+]
+
+# Base Token Registry. With ONCHAIN_ROUTER=zerox this is also the allowlist of tradable tokens.
 TOKENS = {
     "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   # Native USDC
     "USDC.e": "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca", # Bridged USDC
     "WETH": "0x4200000000000000000000000000000000000006",
-    "BTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",    # WBTC
+    "BTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",    # cbBTC
     "AERO": "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
     "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
     "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
     "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
+}
+
+# Dropped from TOKENS but possibly still held: symbol -> (address, dust threshold in raw units).
+LEGACY_TOKENS = {
+    "WBTC": ("0x0555E30da8f98308EdB960aa94C0Db47230d2B9c", 1000),
 }
 
 # Tokens to check during balance scan (minimal set to avoid rate limits)
@@ -110,6 +147,10 @@ GAS_LIMIT_BUFFER_PCT = 125
 MAX_SWAP_USD = Decimal(os.environ.get("ONCHAIN_MAX_SWAP_USD", "100"))
 MAX_PRICE_DEVIATION_PCT = Decimal(os.environ.get("ONCHAIN_MAX_PRICE_DEVIATION_PCT", "2"))
 MAX_PRIORITY_FEE_WEI = Web3.to_wei(Decimal(os.environ.get("ONCHAIN_MAX_PRIORITY_FEE_GWEI", "0.1")), "gwei")
+ONCHAIN_ROUTER = os.environ.get("ONCHAIN_ROUTER", "aerodrome").strip().lower()
+ONCHAIN_ROUTERS = ("aerodrome", "zerox")
+ONCHAIN_ROUND_TRIP_FEE_PCT = Decimal(os.environ.get("ONCHAIN_ROUND_TRIP_FEE_PCT", "0.006"))
+ZEROX_MAX_QUOTE_AGE_BLOCKS = int(os.environ.get("ZEROX_MAX_QUOTE_AGE_BLOCKS", "3"))
 PRICE_PROBE_USDC = 10
 ONCHAIN_KILL_SWITCH_FILE = os.environ.get(
     "ONCHAIN_KILL_SWITCH_FILE",
@@ -124,7 +165,7 @@ KNOWN_DECIMALS = {
     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": 6,    # USDC
     "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": 6,    # USDC.e
     "0x4200000000000000000000000000000000000006": 18,   # WETH
-    "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c": 8,    # WBTC
+    "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf": 8,    # cbBTC
     "0x940181a94A35A4569E4529A3CDfB74e38FD98631": 18,   # AERO
     "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
     "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
@@ -144,8 +185,46 @@ class KillSwitchEngaged(RuntimeError):
     pass
 
 
+class ZeroExQuoteRejected(ZeroExError):
+    pass
+
+
 def onchain_kill_switch_engaged():
     return _env_flag("ONCHAIN_KILL_SWITCH") or os.path.exists(ONCHAIN_KILL_SWITCH_FILE)
+
+
+def engage_onchain_kill_switch(reason):
+    """Create the kill-switch file. Never raises: it runs after swaps have already confirmed."""
+    try:
+        directory = os.path.dirname(ONCHAIN_KILL_SWITCH_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(ONCHAIN_KILL_SWITCH_FILE, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {reason}\n")
+    except OSError as e:
+        logging.critical(f"Could not write kill switch {ONCHAIN_KILL_SWITCH_FILE} ({e}); set ONCHAIN_KILL_SWITCH=true. Reason: {reason}")
+
+
+def _same_address(a, b):
+    return isinstance(a, str) and isinstance(b, str) and a.lower() == b.lower()
+
+
+class _RawContractCall:
+    """The estimate_gas/build_transaction surface _send_contract_tx expects, for API-built calldata."""
+    def __init__(self, w3, to, data, api_gas=None):
+        self._w3 = w3
+        self.to = Web3.to_checksum_address(to)
+        self.data = data
+        self.api_gas = api_gas
+
+    def estimate_gas(self, params):
+        gas = self._w3.eth.estimate_gas({**params, "to": self.to, "data": self.data})
+        if self.api_gas and gas > self.api_gas:
+            logging.warning(f"Our gas estimate {gas} exceeds the 0x estimate {self.api_gas}")
+        return gas
+
+    def build_transaction(self, params):
+        return {**params, "to": self.to, "data": self.data}
 
 
 def retry_rpc_call(func, max_retries=4, base_delay=2.0):
@@ -174,8 +253,17 @@ def _make_web3(url):
 
 
 class EthereumExecutor:
-    """Swaps ERC-20s on Base via the Aerodrome Router."""
+    """Swaps ERC-20s on Base via the Aerodrome Router or the 0x Swap API (ONCHAIN_ROUTER)."""
     def __init__(self, rpc_url, private_key, trading_mode="paper", trusted_rpc_url=None):
+        if ONCHAIN_ROUTER not in ONCHAIN_ROUTERS:
+            raise ValueError(f"ONCHAIN_ROUTER={ONCHAIN_ROUTER!r} is not one of {ONCHAIN_ROUTERS}")
+        self.onchain_router = ONCHAIN_ROUTER
+        self.round_trip_fee_pct = ONCHAIN_ROUND_TRIP_FEE_PCT
+        zerox_api_key = os.environ.get("ZEROX_API_KEY")
+        self.zerox = ZeroExClient(zerox_api_key) if self.onchain_router == "zerox" and zerox_api_key else None
+        if self.onchain_router == "zerox" and self.zerox is None:
+            logging.error("ONCHAIN_ROUTER=zerox but ZEROX_API_KEY is not set: buys refused, exits use Aerodrome")
+        self._allowance_holder_verified = False
         self.primary_rpc_url = rpc_url
         self.trusted_rpc_url = trusted_rpc_url or os.environ.get("BASE_TRUSTED_RPC_URL") or rpc_url
         self.private_key = private_key
@@ -309,7 +397,9 @@ class EthereumExecutor:
                 self._next_nonce = None
 
     def _has_unconfirmed_tx(self):
-        return self._transaction_count("pending") > self._transaction_count("latest")
+        if self._transaction_count("pending") > self._transaction_count("latest"):
+            return True
+        return self._last_sent_hash is not None and self._lookup_tx_status(self._last_sent_hash)[0] == "pending"
 
     def _is_tx_known(self, tx_hash):
         try:
@@ -470,6 +560,23 @@ class EthereumExecutor:
 
         return self._call_with_failover(_do_get_balances)
 
+    def warn_about_stranded_tokens(self):
+        """Warn about held tokens that were removed from TOKENS; the bot no longer manages or sells them."""
+        if not self.account:
+            return
+        for symbol, (address, dust) in LEGACY_TOKENS.items():
+            try:
+                raw = self._call_with_failover(lambda: self.w3.eth.contract(address=address, abi=ERC20_ABI)
+                                               .functions.balanceOf(self.account.address).call())
+            except Exception as e:
+                logging.warning(f"Could not check for stranded {symbol} ({address}): {e}")
+                continue
+            if raw > dust:
+                logging.warning(
+                    f"STRANDED TOKEN: wallet holds {raw} raw units of {symbol} ({address}), which is no longer "
+                    f"in the token registry. The bot will not manage or sell it; move or swap it manually."
+                )
+
     def get_market_data(self, product_id, window):
         return None
 
@@ -508,17 +615,20 @@ class EthereumExecutor:
                 except: pass
         return None
 
-    def _approve_token(self, token_address, amount):
-        """Approve the Aerodrome Router to spend tokens. Returns True if already approved,
-        the approval tx hash (hex) if one was mined, or None on failure."""
+    def _approve_token(self, token_address, amount, spender=AERODROME_ROUTER_ADDRESS, exact=False):
+        """Approve spender (default the Aerodrome Router, for MAX) to spend tokens. exact=True
+        approves only `amount` and always reads the live allowance. Returns True if already
+        approved, the approval tx hash (hex) if one was mined, or None on failure."""
         if self.trading_mode != "live" or not self.account:
             return True
 
         addr_lower = token_address.lower()
         cache_key = f"{addr_lower}:{self.account.address}"
-        router = Web3.to_checksum_address(AERODROME_ROUTER_ADDRESS)
+        spender = Web3.to_checksum_address(spender)
+        approve_amount = amount if exact else 2**256 - 1
+        label = str(amount) if exact else "MAX"
 
-        if cache_key in self._allowance_cache:
+        if not exact and cache_key in self._allowance_cache:
             cached_allowance = self._allowance_cache[cache_key]
             if cached_allowance == 2**256 - 1:
                 logging.info(f"Using cached MAX approval for {token_address}")
@@ -534,32 +644,34 @@ class EthereumExecutor:
             )
 
             allowance = retry_rpc_call(
-                lambda: token_contract.functions.allowance(self.account.address, router).call()
+                lambda: token_contract.functions.allowance(self.account.address, spender).call()
             )
-            self._allowance_cache[cache_key] = allowance
-            logging.info(f"Current allowance for {token_address} on router: {allowance}")
+            if not exact:
+                self._allowance_cache[cache_key] = allowance
+            logging.info(f"Current allowance for {token_address} on {spender}: {allowance}")
 
             if allowance >= amount:
                 return True
 
             # Some tokens (like USDT) require resetting to 0 first if allowance is non-zero
             if allowance > 0:
-                logging.info(f"Resetting allowance for {token_address} from {allowance} to 0 before MAX approval")
-                reset_hash = self._send_contract_tx(token_contract.functions.approve(router, 0))
+                logging.info(f"Resetting allowance for {token_address} from {allowance} to 0 before {label} approval")
+                reset_hash = self._send_contract_tx(token_contract.functions.approve(spender, 0))
                 status, _ = self._await_receipt(reset_hash, RECEIPT_TIMEOUT_SECONDS)
                 if status != "confirmed":
                     logging.error(f"Allowance reset not confirmed ({status}). Tx: {reset_hash.hex()}")
                     return None
 
-            logging.info(f"Approving MAX for {token_address}")
-            approve_hash = self._send_contract_tx(token_contract.functions.approve(router, 2**256 - 1))
+            logging.info(f"Approving {label} of {token_address} for {spender}")
+            approve_hash = self._send_contract_tx(token_contract.functions.approve(spender, approve_amount))
             status, receipt = self._await_receipt(approve_hash, RECEIPT_TIMEOUT_SECONDS)
 
             if status == "confirmed":
-                logging.info(f"Approved MAX for {token_address}. Tx: {approve_hash.hex()}")
-                self._allowance_cache[cache_key] = 2**256 - 1
+                logging.info(f"Approved {label} for {token_address}. Tx: {approve_hash.hex()}")
+                if not exact:
+                    self._allowance_cache[cache_key] = 2**256 - 1
                 return approve_hash.hex()
-            logging.error(f"Approve MAX not confirmed ({status}): {receipt}")
+            logging.error(f"Approve {label} not confirmed ({status}): {receipt}")
             return None
         except KillSwitchEngaged:
             raise
@@ -630,13 +742,28 @@ class EthereumExecutor:
             return 1 - fill_price / reference_price
         return None
 
-    def execute_swap(self, token_in, token_out, amount_in, recipient, reference_price=None):
-        """Exact-input swap via Aerodrome Router.swapExactTokensForTokens.
+    def _reference_price_refusal(self, token_in, token_out, amount_in, expected_out, reference_price, venue):
+        """Error string when the quoted fill is worse than reference_price (USDC per token) by more
+        than MAX_PRICE_DEVIATION_PCT, or cannot be compared with it; None when within bounds."""
+        reference = Decimal(str(reference_price))
+        deviation = self._adverse_price_deviation(token_in, token_out, amount_in, expected_out, reference) if reference > 0 else None
+        if deviation is None or deviation * 100 > MAX_PRICE_DEVIATION_PCT:
+            logging.error(
+                f"{venue} quote {expected_out} for {amount_in} vs reference price {reference_price}: "
+                f"adverse deviation {deviation} exceeds {MAX_PRICE_DEVIATION_PCT}%; refusing swap"
+            )
+            return "quote deviates from reference price"
+        return None
 
-        Refuses to trade without a live quote; amountOutMin = quote less SLIPPAGE_BPS and the
-        router enforces TX_DEADLINE_SECONDS. With reference_price (USDC per token), also refuses
-        quotes worse than it by more than MAX_PRICE_DEVIATION_PCT. A result with "pending": True
-        means the outcome could not be confirmed; callers must not resubmit.
+    def execute_swap(self, token_in, token_out, amount_in, recipient, reference_price=None):
+        """Exact-input swap through the configured ONCHAIN_ROUTER.
+
+        Aerodrome: refuses to trade without a live quote; amountOutMin = quote less SLIPPAGE_BPS
+        and the router enforces TX_DEADLINE_SECONDS. With reference_price (USDC per token), also
+        refuses quotes worse than it by more than MAX_PRICE_DEVIATION_PCT. 0x: see
+        _execute_zerox_swap; exits (sells into USDC) fall back to Aerodrome when 0x is unusable.
+        A result with "pending": True means the outcome could not be confirmed; callers must not
+        resubmit.
         """
         if self.trading_mode != "live":
             logging.info(f"[PAPER] Would swap {amount_in} of {token_in} for {token_out}")
@@ -648,80 +775,293 @@ class EthereumExecutor:
         if amount_in <= 0:
             return {"success": False, "error": "amount_in must be positive"}
 
+        if self.onchain_router != "zerox":
+            return self._execute_aerodrome_swap(token_in, token_out, amount_in, recipient, reference_price)
+
+        registry = {address.lower() for address in TOKENS.values()}
+        if token_in.lower() not in registry or token_out.lower() not in registry:
+            logging.error(f"Swap {token_in} -> {token_out} involves a token outside the registry; refusing")
+            return {"success": False, "error": "token not in registry allowlist"}
+        result = self._execute_zerox_swap(token_in, token_out, amount_in, recipient, reference_price)
+        if not result.pop("zerox_unavailable", False) or token_out.lower() != TOKENS["USDC"].lower():
+            return result
+        logging.warning(f"0x route unusable for exit sell ({result['error']}); falling back to Aerodrome")
+        return self._execute_aerodrome_swap(token_in, token_out, amount_in, recipient, reference_price)
+
+    def _preflight(self, token_in, amount_in):
+        """Checks shared by both routers. Returns a refusal result, or None to proceed."""
+        if self._exceeds_position_cap(token_in, amount_in):
+            logging.error(f"Swap of {amount_in} raw USDC exceeds ONCHAIN_MAX_SWAP_USD={MAX_SWAP_USD}")
+            return {"success": False, "error": "position size cap exceeded"}
+
+        self._verify_chain()
+        eth_balance = float(Web3.from_wei(
+            retry_rpc_call(lambda: self.trusted_w3.eth.get_balance(self.account.address)), 'ether'
+        ))
+        if eth_balance < MIN_GAS_ETH:
+            logging.error(f"Insufficient ETH for gas: {eth_balance:.6f} ETH < {MIN_GAS_ETH} ETH minimum")
+            return {"success": False, "error": "insufficient gas"}
+        return None
+
+    def _in_flight_refusal(self):
+        logging.error("Account has an unconfirmed transaction in flight; refusing to stack another swap")
+        return {"success": False, "error": "unconfirmed transaction in flight"}
+
+    def _execute_aerodrome_swap(self, token_in, token_out, amount_in, recipient, reference_price):
         try:
-            if self._exceeds_position_cap(token_in, amount_in):
-                logging.error(f"Swap of {amount_in} raw USDC exceeds ONCHAIN_MAX_SWAP_USD={MAX_SWAP_USD}")
-                return {"success": False, "error": "position size cap exceeded"}
+            refusal = self._preflight(token_in, amount_in)
+            if refusal:
+                return refusal
 
-            self._verify_chain()
-            if self._has_unconfirmed_tx():
-                logging.error("Account has an unconfirmed transaction in flight; refusing to stack another swap")
-                return {"success": False, "error": "unconfirmed transaction in flight"}
+            # Held from the in-flight check through broadcast so concurrent swaps cannot both pass it.
+            with self._nonce_lock:
+                if self._has_unconfirmed_tx():
+                    return self._in_flight_refusal()
 
-            eth_balance = float(Web3.from_wei(
-                retry_rpc_call(lambda: self.trusted_w3.eth.get_balance(self.account.address)), 'ether'
-            ))
-            if eth_balance < MIN_GAS_ETH:
-                logging.error(f"Insufficient ETH for gas: {eth_balance:.6f} ETH < {MIN_GAS_ETH} ETH minimum")
-                return {"success": False, "error": "insufficient gas"}
-
-            quote = self.get_quote(token_in, token_out, amount_in)
-            if quote is None:
-                return {"success": False, "error": "no quote available; refusing to swap without slippage protection"}
-
-            approval_result = self._approve_token(token_in, amount_in)
-            if approval_result is None:
-                logging.error(f"Token approval failed for {token_in}, cannot execute swap")
-                return {"success": False, "error": "approval failed"}
-            if approval_result is not True:
                 quote = self.get_quote(token_in, token_out, amount_in)
                 if quote is None:
-                    return {"success": False, "error": "no quote available after approval"}
+                    return {"success": False, "error": "no quote available; refusing to swap without slippage protection"}
 
-            routes, expected_out = quote
-            if reference_price is not None:
-                reference = Decimal(str(reference_price))
-                deviation = self._adverse_price_deviation(token_in, token_out, amount_in, expected_out, reference) if reference > 0 else None
-                if deviation is None or deviation * 100 > MAX_PRICE_DEVIATION_PCT:
-                    logging.error(
-                        f"Aerodrome quote {expected_out} for {amount_in} vs reference price {reference_price}: "
-                        f"adverse deviation {deviation} exceeds {MAX_PRICE_DEVIATION_PCT}%; refusing swap"
-                    )
-                    return {"success": False, "error": "quote deviates from reference price"}
+                approval_result = self._approve_token(token_in, amount_in)
+                if approval_result is None:
+                    logging.error(f"Token approval failed for {token_in}, cannot execute swap")
+                    return {"success": False, "error": "approval failed"}
+                if approval_result is not True:
+                    quote = self.get_quote(token_in, token_out, amount_in)
+                    if quote is None:
+                        return {"success": False, "error": "no quote available after approval"}
 
-            amount_out_min = self._amount_out_minimum(expected_out)
-            if amount_out_min <= 0:
-                return {"success": False, "error": "amountOutMinimum rounds to zero; refusing swap"}
+                routes, expected_out = quote
+                if reference_price is not None:
+                    refusal = self._reference_price_refusal(token_in, token_out, amount_in, expected_out, reference_price, "Aerodrome")
+                    if refusal:
+                        return {"success": False, "error": refusal}
 
-            deadline = self._latest_block()["timestamp"] + TX_DEADLINE_SECONDS
-            logging.info(
-                f"Aerodrome swap: in={amount_in} expected={expected_out} min={amount_out_min} "
-                f"({SLIPPAGE_BPS}bps) hops={len(routes)} deadline={deadline}"
-            )
-            swap_fn = self.router_contract.functions.swapExactTokensForTokens(
-                amount_in, amount_out_min, routes, Web3.to_checksum_address(recipient), deadline
-            )
-            tx_hash = self._send_contract_tx(swap_fn)
+                amount_out_min = self._amount_out_minimum(expected_out)
+                if amount_out_min <= 0:
+                    return {"success": False, "error": "amountOutMinimum rounds to zero; refusing swap"}
+
+                deadline = self._latest_block()["timestamp"] + TX_DEADLINE_SECONDS
+                logging.info(
+                    f"Aerodrome swap: in={amount_in} expected={expected_out} min={amount_out_min} "
+                    f"({SLIPPAGE_BPS}bps) hops={len(routes)} deadline={deadline}"
+                )
+                swap_fn = self.router_contract.functions.swapExactTokensForTokens(
+                    amount_in, amount_out_min, routes, Web3.to_checksum_address(recipient), deadline
+                )
+                tx_hash = self._send_contract_tx(swap_fn)
         except Exception as e:
             logging.error(f"Swap not broadcast: {e}")
             return {"success": False, "error": str(e)}
 
+        return self._await_swap(tx_hash, amount_in, amount_out_min)[0]
+
+    def _execute_zerox_swap(self, token_in, token_out, amount_in, recipient, reference_price):
+        """Exact-input swap with 0x AllowanceHolder calldata, signed and sent by us.
+
+        Refuses unless the signed /quote targets the pinned AllowanceHolder, exec()s into the
+        registry's current (or, during dwell, previous) Settler for our sell token and amount,
+        sends no ETH, sets minBuyAmount at or above our slippage floor, was sampled within
+        ZEROX_MAX_QUOTE_AGE_BLOCKS, and fills within MAX_PRICE_DEVIATION_PCT of reference_price.
+        Failures attributable to 0x carry "zerox_unavailable" so execute_swap can fall back.
+        """
+        if not _same_address(recipient, self.account.address):
+            return {"success": False, "error": "0x swaps must pay our own wallet"}
+        if reference_price is None or Decimal(str(reference_price)) <= 0:
+            logging.error(f"No usable reference price ({reference_price}); refusing unguarded 0x swap")
+            return {"success": False, "error": "no reference price; refusing unguarded swap"}
+        try:
+            refusal = self._preflight(token_in, amount_in)
+            if refusal:
+                return refusal
+
+            with self._nonce_lock:
+                if self._has_unconfirmed_tx():
+                    return self._in_flight_refusal()
+
+                indicative = self._zerox_request("price", token_in, token_out, amount_in)
+                self._check_zerox_response(indicative, token_in, token_out, amount_in, reference_price, firm=False)
+
+                if self._approve_token(token_in, amount_in, spender=ALLOWANCE_HOLDER_ADDRESS, exact=True) is None:
+                    logging.error(f"Token approval failed for {token_in}, cannot execute swap")
+                    return {"success": False, "error": "approval failed"}
+
+                quote = self._zerox_request("quote", token_in, token_out, amount_in)
+                our_min = self._check_zerox_response(quote, token_in, token_out, amount_in, reference_price, firm=True)
+                swap_call = self._check_zerox_transaction(quote, token_in, token_out, amount_in, our_min)
+                self._check_zerox_freshness(quote)
+                logging.info(
+                    f"0x swap: in={amount_in} buy={quote['buyAmount']} minBuy={quote['minBuyAmount']} "
+                    f"ourMin={our_min} zeroExFee={(quote.get('fees') or {}).get('zeroExFee')} "
+                    f"route={[f.get('source') for f in (quote.get('route') or {}).get('fills', [])]} zid={quote.get('zid')}"
+                )
+                tx_hash = self._send_contract_tx(swap_call)
+        except ZeroExError as e:
+            logging.error(f"0x route refused; nothing signed: {e}")
+            return {"success": False, "error": f"0x: {e}", "zerox_unavailable": True}
+        except Exception as e:
+            logging.error(f"Swap not broadcast: {e}")
+            return {"success": False, "error": str(e)}
+
+        result, receipt = self._await_swap(tx_hash, amount_in, our_min)
+        if result.get("confirmed"):
+            self._verify_fill(token_out, receipt, our_min, result["tx_hash"])
+        return result
+
+    def _zerox_request(self, kind, token_in, token_out, amount_in):
+        if self.zerox is None:
+            raise ZeroExError("ZEROX_API_KEY is not set")
+        params = {
+            "chainId": EXPECTED_CHAIN_ID,
+            "sellToken": token_in,
+            "buyToken": token_out,
+            "sellAmount": str(amount_in),
+            "taker": self.account.address,
+            "recipient": self.account.address,
+            "slippagePpm": SLIPPAGE_BPS * 100,
+        }
+        return getattr(self.zerox, kind)(params)
+
+    def _check_zerox_response(self, response, token_in, token_out, amount_in, reference_price, firm):
+        """Validate a /price (firm=False) or /quote (firm=True) body. Returns our minimum output."""
+        try:
+            issues = response["issues"]
+            if response.get("liquidityAvailable") is not True:
+                raise ZeroExQuoteRejected("no liquidity available")
+            if issues.get("balance") is not None:
+                raise ZeroExQuoteRejected(f"insufficient sell-token balance: {issues['balance']}")
+            allowance_issue = issues.get("allowance")
+            if allowance_issue is not None and not _same_address(allowance_issue.get("spender"), ALLOWANCE_HOLDER_ADDRESS):
+                raise ZeroExQuoteRejected(f"allowance spender {allowance_issue.get('spender')} is not AllowanceHolder")
+            if not _same_address(response.get("allowanceTarget"), ALLOWANCE_HOLDER_ADDRESS):
+                raise ZeroExQuoteRejected(f"allowanceTarget {response.get('allowanceTarget')} is not AllowanceHolder")
+            if not (_same_address(response.get("sellToken"), token_in) and _same_address(response.get("buyToken"), token_out)
+                    and int(response["sellAmount"]) == amount_in):
+                raise ZeroExQuoteRejected("response does not match the requested order")
+            buy_amount, min_buy = int(response["buyAmount"]), int(response["minBuyAmount"])
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise ZeroExQuoteRejected(f"malformed 0x response: {e!r}") from None
+        if buy_amount <= 0 or min_buy <= 0:
+            raise ZeroExQuoteRejected(f"non-positive buyAmount {buy_amount} / minBuyAmount {min_buy}")
+        refusal = self._reference_price_refusal(token_in, token_out, amount_in, buy_amount, reference_price, "0x")
+        if refusal:
+            raise ZeroExQuoteRejected(refusal)
+        our_min = self._amount_out_minimum(buy_amount)
+        if firm:
+            if issues.get("simulationIncomplete") is not False:
+                raise ZeroExQuoteRejected("0x could not simulate the swap")
+            if issues.get("invalidSourcesPassed"):
+                raise ZeroExQuoteRejected(f"invalid sources: {issues['invalidSourcesPassed']}")
+            if our_min <= 0 or min_buy < our_min:
+                raise ZeroExQuoteRejected(f"minBuyAmount {min_buy} below our floor {our_min}")
+        return our_min
+
+    def _check_zerox_transaction(self, quote, token_in, token_out, amount_in, our_min):
+        """Validate quote.transaction, including the Settler call it forwards, and return it as a
+        call for _send_contract_tx."""
+        try:
+            tx = quote["transaction"]
+            to, value, data = tx["to"], int(tx["value"]), tx["data"]
+            api_gas = int(tx["gas"]) if tx.get("gas") else None
+            if not data.lower().startswith(ALLOWANCE_HOLDER_EXEC_SELECTOR):
+                raise ZeroExQuoteRejected("transaction.data is not AllowanceHolder.exec")
+            operator, token, amount, target, settler_call = abi_decode(
+                ["address", "address", "uint256", "address", "bytes"], bytes.fromhex(data[10:]))
+            if "0x" + settler_call[:4].hex() != SETTLER_EXECUTE_SELECTOR:
+                raise ZeroExQuoteRejected("exec() data is not Settler.execute")
+            (recipient, buy_token, min_amount_out), _, _ = abi_decode(
+                ["(address,address,uint256)", "bytes[]", "bytes32"], settler_call[4:])
+        except (KeyError, TypeError, ValueError, AttributeError, DecodingError) as e:
+            raise ZeroExQuoteRejected(f"malformed 0x transaction: {e!r}") from None
+        if not _same_address(recipient, self.account.address):
+            raise ZeroExQuoteRejected(f"Settler slippage recipient {recipient} is not our wallet")
+        if not _same_address(buy_token, token_out):
+            raise ZeroExQuoteRejected(f"Settler slippage buyToken {buy_token} is not {token_out}")
+        if min_amount_out < our_min:
+            raise ZeroExQuoteRejected(f"Settler slippage minAmountOut {min_amount_out} below our floor {our_min}")
+        if not _same_address(to, ALLOWANCE_HOLDER_ADDRESS):
+            raise ZeroExQuoteRejected(f"transaction.to {to} is not AllowanceHolder")
+        if value != 0:
+            raise ZeroExQuoteRejected(f"transaction.value {value} must be 0 for an ERC-20 sell")
+        if not _same_address(token, token_in) or amount > amount_in:
+            raise ZeroExQuoteRejected(f"exec() token/amount {token}/{amount} does not match our {token_in}/{amount_in}")
+        if not _same_address(operator, target):
+            raise ZeroExQuoteRejected(f"exec() operator {operator} differs from target {target}")
+        self._require_allowance_holder_code()
+        self._require_genuine_settler(target)
+        return _RawContractCall(self.trusted_w3, ALLOWANCE_HOLDER_ADDRESS, data, api_gas)
+
+    def _require_allowance_holder_code(self):
+        if self._allowance_holder_verified:
+            return
+        code = retry_rpc_call(lambda: self.trusted_w3.eth.get_code(Web3.to_checksum_address(ALLOWANCE_HOLDER_ADDRESS)))
+        if not code:
+            raise ZeroExQuoteRejected("AllowanceHolder has no code on the trusted RPC's chain")
+        self._allowance_holder_verified = True
+
+    def _require_genuine_settler(self, target):
+        registry = self.trusted_w3.eth.contract(
+            address=Web3.to_checksum_address(SETTLER_REGISTRY_ADDRESS), abi=SETTLER_REGISTRY_ABI)
+        feature = SETTLER_TAKER_SUBMITTED_FEATURE
+        try:
+            current = retry_rpc_call(lambda: registry.functions.ownerOf(feature).call())
+        except Exception as e:
+            raise ZeroExQuoteRejected(f"Settler paused or registry unreadable (ownerOf({feature}): {e})") from None
+        if _same_address(current, target):
+            return
+        try:
+            previous = retry_rpc_call(lambda: registry.functions.prev(feature).call())
+        except Exception as e:
+            raise ZeroExQuoteRejected(f"exec() target {target} is not Settler {current}; prev({feature}) failed: {e}") from None
+        if not _same_address(previous, target):
+            raise ZeroExQuoteRejected(f"exec() target {target} is neither Settler {current} nor previous {previous}")
+        logging.info(f"0x targets the previous Settler {target} (registry dwell period)")
+
+    def _check_zerox_freshness(self, quote):
+        age = self._latest_block()["number"] - int(quote["blockNumber"])
+        if age > ZEROX_MAX_QUOTE_AGE_BLOCKS:
+            raise ZeroExQuoteRejected(f"quote sampled {age} blocks ago (max {ZEROX_MAX_QUOTE_AGE_BLOCKS})")
+
+    def _token_balance(self, token, block_identifier):
+        contract = self.trusted_w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
+        return retry_rpc_call(
+            lambda: contract.functions.balanceOf(self.account.address).call(block_identifier=block_identifier))
+
+    def _verify_fill(self, token_out, receipt, our_min, tx_hex):
+        """Engage the kill switch if a confirmed 0x swap delivered less than our floor. Never resubmits.
+        An unreadable balance is logged but does not engage it, so a flaky RPC cannot freeze exits."""
+        block = receipt["blockNumber"]
+        try:
+            before = self._token_balance(token_out, block - 1)
+            received = self._token_balance(token_out, block) - before
+        except Exception as e:
+            logging.critical(f"Could not read balances around block {block} for {tx_hex}; fill unverified: {e}")
+            return
+        if received < our_min:
+            logging.critical(
+                f"0x swap {tx_hex} delivered {received} of {token_out}, below our floor {our_min}; "
+                f"engaging on-chain kill switch ({ONCHAIN_KILL_SWITCH_FILE})"
+            )
+            engage_onchain_kill_switch(f"0x fill shortfall tx={tx_hex} received={received} floor={our_min}")
+
+    def _await_swap(self, tx_hash, amount_in, amount_out_min):
+        """Reconcile a broadcast swap. Returns (result, receipt)."""
         tx_hex = tx_hash.hex()
         status, receipt = self._await_receipt(tx_hash, RECEIPT_TIMEOUT_SECONDS)
         if status == "confirmed":
             logging.info(f"Swap successful. Tx: {tx_hex}")
-            return {"success": True, "confirmed": True, "tx_hash": tx_hex}
+            return {"success": True, "confirmed": True, "tx_hash": tx_hex}, receipt
         if status == "reverted":
             logging.error(
                 f"Swap reverted. Tx: {tx_hex} | gasUsed={receipt.get('gasUsed', '?')} | "
                 f"In={amount_in} OutMin={amount_out_min} | https://basescan.org/tx/{tx_hex}"
             )
-            return {"success": False, "error": "transaction reverted", "tx_hash": tx_hex}
+            return {"success": False, "error": "transaction reverted", "tx_hash": tx_hex}, receipt
         if status == "dropped":
             logging.error(f"Swap tx {tx_hex} was dropped from the mempool")
-            return {"success": False, "error": "transaction dropped", "tx_hash": tx_hex}
+            return {"success": False, "error": "transaction dropped", "tx_hash": tx_hex}, receipt
         logging.error(f"Swap tx {tx_hex} unresolved ({status}); NOT resubmitting. Check https://basescan.org/tx/{tx_hex}")
-        return {"success": False, "pending": True, "error": f"transaction {status}; do not resubmit", "tx_hash": tx_hex}
+        return {"success": False, "pending": True, "error": f"transaction {status}; do not resubmit", "tx_hash": tx_hex}, receipt
 
     def place_market_order(self, product_id, side, amount_quote_currency=None, amount_base_currency=None, reference_price=None):
         """Convert a high-level buy/sell into an on-chain swap.

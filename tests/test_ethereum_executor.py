@@ -279,6 +279,27 @@ class TestNonceHandling:
         assert "in flight" in result["error"]
         router.functions.swapExactTokensForTokens.assert_not_called()
 
+    def test_concurrent_swaps_never_stack_behind_an_unconfirmed_tx(self, executor, nonces):
+        _, swap_fn = _install_router(executor, _best_direct_volatile)
+        swap_fn.estimate_gas.side_effect = lambda *a, **k: (time.sleep(0.05), GAS_ESTIMATE)[1]
+
+        def broadcast(raw):
+            nonces["pending"] += 1
+            return Web3.keccak(raw)
+        executor.trusted_w3.eth.send_raw_transaction.side_effect = broadcast
+        results = []
+        swap = lambda: results.append(executor.execute_swap(WETH, USDC, 10**17, executor.account.address))
+        threads = [threading.Thread(target=swap) for _ in range(2)]
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert executor.trusted_w3.eth.send_raw_transaction.call_count == 1
+        assert sorted(r["success"] for r in results) == [False, True]
+        assert any("in flight" in r.get("error", "") for r in results)
+
 
 class TestReceiptReconciliation:
     def test_timeout_then_mined_reports_success(self, executor):

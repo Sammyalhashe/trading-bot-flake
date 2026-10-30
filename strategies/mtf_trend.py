@@ -131,7 +131,7 @@ class MTFTrendStrategy:
         return sorted(candidates, key=lambda x: x["score"], reverse=True)
 
     def check_exit(self, asset, product_id, market_data, price, entry, hwm,
-                   tp_flags, state, entry_key):
+                   tp_flags, state, entry_key, round_trip_fee_pct=None):
         df_1h = market_data.get("1h")
         df_15m = market_data.get("15m")
         sell_trigger = False
@@ -183,7 +183,7 @@ class MTFTrendStrategy:
         # Priority 4: 4h trend reversal — partial exit
         if not sell_trigger and not tp_flags.get("trend_exit_hit", False) and df_1h is not None:
             pnl_pct = (price - entry) / entry
-            fee_floor = float(self.config.round_trip_fee_pct) * 1.5
+            fee_floor = float(self.config.round_trip_fee_pct if round_trip_fee_pct is None else round_trip_fee_pct) * 1.5
             bias, _, _ = self._get_4h_bias(df_1h)
             if bias == "BEAR":
                 if pnl_pct > fee_floor:

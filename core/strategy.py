@@ -31,11 +31,13 @@ class Strategy(Protocol):
     def check_exit(self, asset: str, product_id: str,
                    market_data: dict[str, pd.DataFrame],
                    price: float, entry: float, hwm: float,
-                   tp_flags: dict, state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+                   tp_flags: dict, state: dict, entry_key: str,
+                   round_trip_fee_pct=None) -> tuple[bool, float, str, dict]:
         """Check for exit signal.
 
         Args:
             market_data: Dict of DataFrames keyed by timeframe (e.g. "1h", "15m").
+            round_trip_fee_pct: The executing venue's fee rate; None means config.round_trip_fee_pct.
 
         Returns (sell_trigger, sell_ratio, reason, updated_tp_flags).
         """

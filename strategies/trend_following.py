@@ -170,7 +170,7 @@ class TrendFollowingStrategy:
 
     def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
-                   state: dict, entry_key: str) -> tuple[bool, float, str, dict]:
+                   state: dict, entry_key: str, round_trip_fee_pct=None) -> tuple[bool, float, str, dict]:
         df = market_data["1h"]
         sell_trigger = False
         current_price = df["close"].iloc[-1]
@@ -225,7 +225,7 @@ class TrendFollowingStrategy:
         # Only exit if gain exceeds 1.5× round-trip fees; otherwise let trailing stop handle it
         if not sell_trigger and not tp_flags.get("trend_exit_hit", False):
             pnl_pct = (price - entry) / entry
-            fee_floor = float(self.config.round_trip_fee_pct) * 1.5
+            fee_floor = float(self.config.round_trip_fee_pct if round_trip_fee_pct is None else round_trip_fee_pct) * 1.5
             ma_s, ma_l = self.ta.analyze_trend(df)
             if ma_s and ma_l and (ma_s < ma_l * 0.998 or current_price < ma_l * 0.99):
                 if pnl_pct > fee_floor:

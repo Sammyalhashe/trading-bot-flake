@@ -200,7 +200,8 @@ class RiskManager:
 
         return buy_size
 
-    def calculate_fees(self, trade_value: float, is_round_trip: bool = True) -> float:
+    def calculate_fees(self, trade_value: float, is_round_trip: bool = True,
+                       round_trip_fee_pct: Optional[Decimal] = None) -> float:
         """Calculate trading fees.
 
         This implements the fee calculation from trading_bot.py lines 577-585.
@@ -209,11 +210,12 @@ class RiskManager:
             trade_value: Value of the trade in USD
             is_round_trip: If True, calculate full round-trip fee (buy + sell)
                           If False, calculate single-leg fee
+            round_trip_fee_pct: The executing venue's rate; defaults to config.round_trip_fee_pct
 
         Returns:
             Fee amount in USD
         """
-        fee_pct = float(self.config.round_trip_fee_pct)
+        fee_pct = float(self.config.round_trip_fee_pct if round_trip_fee_pct is None else round_trip_fee_pct)
 
         if is_round_trip:
             return trade_value * fee_pct
