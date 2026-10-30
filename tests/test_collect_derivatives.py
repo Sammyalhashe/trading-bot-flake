@@ -18,3 +18,10 @@ def test_output_dir_honours_env_override(monkeypatch, tmp_path):
     import backtesting.collect_derivatives_data as collector
     importlib.reload(collector)
     assert collector.OUTPUT_DIR == tmp_path / "derivs"
+
+
+def test_backtester_reads_the_same_data_dir_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("DERIVATIVES_DATA_DIR", str(tmp_path / "derivs"))
+    import backtesting.backtest_derivatives as backtest_derivatives
+    importlib.reload(backtest_derivatives)
+    assert backtest_derivatives.DERIVATIVES_DIR == tmp_path / "derivs"

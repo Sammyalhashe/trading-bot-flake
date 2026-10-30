@@ -11,6 +11,7 @@ Usage:
 NOTE: This backtest is inherently limited by the ~30-90 day window of available
 OKX derivatives history. Run the collector regularly to build more history.
 """
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -26,7 +27,8 @@ from strategies import create_strategy
 from backtesting.backtest import BacktestEngine
 
 
-DERIVATIVES_DIR = Path(__file__).parent.parent / "data" / "derivatives"
+# Same override as collect_derivatives_data.py, so it can read what the packaged collector wrote.
+DERIVATIVES_DIR = Path(os.environ.get("DERIVATIVES_DATA_DIR", Path(__file__).parent.parent / "data" / "derivatives"))
 OHLCV_DIR = Path(__file__).parent.parent / "data" / "backtest" / "YTD_2025_1h"
 
 # Funding rate thresholds (matching live config defaults)
