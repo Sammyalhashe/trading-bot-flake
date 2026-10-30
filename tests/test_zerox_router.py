@@ -1,16 +1,19 @@
 """EthereumExecutor with ONCHAIN_ROUTER=zerox. Every 0x and trusted-RPC call is mocked; no network."""
+import base64
 import copy
 import itertools
+import json
 import logging
 import os
 import subprocess
 import sys
 import threading
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from eth_abi import encode
+from eth_abi import decode, encode
 from eth_account import Account
 from web3 import Web3
 from web3.datastructures import AttributeDict
@@ -265,7 +268,6 @@ def _install_aerodrome(executor, amount_out):
     swap_fn.estimate_gas.return_value = 200_000
     swap_fn.build_transaction.side_effect = lambda params: {**params, "to": AERODROME_ROUTER, "data": "0xcac88ea9"}
     executor.router_contract = router
-    executor._allowance_cache[f"{WETH.lower()}:{executor.account.address}"] = 2**256 - 1
     return router
 
 
@@ -784,6 +786,17 @@ class TestExitFallback:
         assert [tx["to"] for tx in signed] == [AERODROME_ROUTER]
         router.functions.swapExactTokensForTokens.assert_called_once()
 
+    def test_fallback_sell_approves_the_aerodrome_router_for_exactly_the_sell_amount(self, executor, chain, signed):
+        executor.zerox = FakeZeroEx(price=ZeroExError("0x HTTP 503"), quote=ZeroExError("0x HTTP 503"))
+        weth = chain.tokens[WETH.lower()]
+        weth.functions.allowance.return_value.call.return_value = 0
+        _install_aerodrome(executor, SELL_OUT)
+
+        assert _sell(executor)["success"] is True
+
+        weth.functions.approve.assert_called_once_with(AERODROME_ROUTER, SELL_IN)
+        assert [tx["to"] for tx in signed] == [WETH, AERODROME_ROUTER]
+
     @pytest.mark.parametrize("case", sorted(SELL_REJECTIONS))
     def test_rejected_sell_quote_falls_back_and_never_signs_0x_data(self, executor, signed, case):
         changes, _ = SELL_REJECTIONS[case]
@@ -911,7 +924,6 @@ class TestRouterSelection:
         executor.onchain_router = "aerodrome"
         executor.zerox = FakeZeroEx(price=AssertionError("0x used"), quote=AssertionError("0x used"))
         _install_aerodrome(executor, SELL_OUT)
-        executor._allowance_cache[f"{USDC.lower()}:{executor.account.address}"] = 2**256 - 1
 
         assert _sell(executor)["success"] is True
         executor.router_contract.functions.getAmountsOut.side_effect = None
@@ -942,3 +954,155 @@ class TestRouterSelection:
                               cwd=REPO, env=env, capture_output=True, text=True)
 
         assert proc.returncode != 0 and "InvalidOperation" in proc.stderr
+
+
+NEW_TOKENS = {
+    "VVV": "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",
+    "AAVE": "0x63706e401c06ac8513145b7687A14804d17f814b",
+    "UNI": "0xc3De830EA07524a0761646a6a4e4be0e114a3C83",
+}
+
+
+class TestRegistryAdditions:
+    @pytest.mark.parametrize("symbol, address", NEW_TOKENS.items())
+    def test_registered_with_18_decimals(self, symbol, address):
+        assert TOKENS[symbol] == address
+        assert Web3.is_checksum_address(address)
+        assert eth_mod.KNOWN_DECIMALS[address] == 18
+
+    def test_exposed_as_supported_assets(self, executor):
+        assert set(NEW_TOKENS) <= set(executor.get_supported_assets())
+
+    def test_decimals_need_no_rpc(self, executor):
+        executor.trusted_w3.eth.contract.reset_mock()
+
+        assert [executor._get_decimals(a) for a in NEW_TOKENS.values()] == [18, 18, 18]
+        executor.trusted_w3.eth.contract.assert_not_called()
+
+    @pytest.mark.parametrize("symbol, address", NEW_TOKENS.items())
+    def test_pass_the_zerox_allowlist_in_both_directions(self, executor, chain, signed, symbol, address):
+        chain.token(address)
+        amount_out = 4 * 10**18
+        _quotes(executor, USDC, address, BUY_IN, amount_out)
+
+        assert executor.execute_swap(USDC, address, BUY_IN, executor.account.address, reference_price=25)["success"] is True
+
+        _quotes(executor, address, USDC, SELL_IN, 25 * 10**6)
+        assert executor.execute_swap(address, USDC, SELL_IN, executor.account.address, reference_price=25)["success"] is True
+
+    def test_unknown_token_is_still_refused(self, executor, signed):
+        unknown = "0x2222222222222222222222222222222222222222"
+
+        result = executor.execute_swap(USDC, unknown, BUY_IN, executor.account.address, reference_price=25)
+
+        assert result["success"] is False and "allowlist" in result["error"]
+        assert executor.zerox.calls == []
+        _assert_nothing_signed(executor, signed)
+
+
+REAL_QUOTE_PATH = os.path.join(REPO, "tests", "fixtures", "zerox_real_quote_usdc_weth.json")
+REAL_SELL_AMOUNT = 25 * 10**6
+REAL_REFERENCE_PRICE = 2240  # USDC per WETH implied by the capture (25 / 0.01116)
+
+
+@pytest.fixture
+def real_quote():
+    with open(REAL_QUOTE_PATH) as f:
+        return json.loads(base64.b64decode(json.load(f)["body_b64"]))
+
+
+@pytest.fixture
+def real_taker():
+    with open(REAL_QUOTE_PATH) as f:
+        return json.load(f)["request_params"]["taker"]
+
+
+@pytest.fixture
+def real_executor(executor, real_taker):
+    executor.account = SimpleNamespace(address=real_taker)
+    return executor
+
+
+def retampered(data, **changes):
+    """Re-encode AllowanceHolder.exec calldata with some of its (and the inner Settler call's) fields replaced."""
+    operator, token, amount, target, settler_call = decode(
+        ["address", "address", "uint256", "address", "bytes"], bytes.fromhex(data[10:]))
+    (recipient, buy_token, min_out), actions, zid = decode(
+        ["(address,address,uint256)", "bytes[]", "bytes32"], settler_call[4:])
+    fields = {"operator": operator, "token": token, "amount": amount, "target": target,
+              "recipient": recipient, "buy_token": buy_token, "min_out": min_out, **changes}
+    inner = bytes.fromhex(EXECUTE_SELECTOR[2:]) + encode(
+        ["(address,address,uint256)", "bytes[]", "bytes32"],
+        [(fields["recipient"], fields["buy_token"], fields["min_out"]), actions, zid])
+    return EXEC_SELECTOR + encode(
+        ["address", "address", "uint256", "address", "bytes"],
+        [fields["operator"], fields["token"], fields["amount"], fields["target"], inner]).hex()
+
+
+class TestRealCapturedQuote:
+    """A live signed Base /quote (USDC -> WETH, taker = captured wallet) through the real validators."""
+
+    def _check_tx(self, executor, quote, our_min=None):
+        our_min = our_min if our_min is not None else executor._amount_out_minimum(int(quote["buyAmount"]))
+        return executor._check_zerox_transaction(quote, USDC, WETH, REAL_SELL_AMOUNT, our_min)
+
+    def test_transaction_accepted_through_the_dwell_branch(self, real_executor, real_quote, chain):
+        assert real_quote["transaction"]["data"].lower().count(PREV_SETTLER[2:].lower()) >= 2
+
+        call = self._check_tx(real_executor, real_quote)
+
+        assert call.to == ALLOWANCE_HOLDER_ADDRESS
+        assert call.data == real_quote["transaction"]["data"]
+        chain.registry.functions.prev.assert_called_once_with(2)
+
+    def test_the_capture_sits_exactly_on_our_slippage_floor(self, real_executor, real_quote):
+        assert real_executor._amount_out_minimum(int(real_quote["buyAmount"])) == int(real_quote["minBuyAmount"])
+
+    @pytest.mark.parametrize("changes, reason", [
+        ({"transaction__to": STRANGER}, "not AllowanceHolder"),
+        ({"transaction__value": "1"}, "must be 0"),
+    ])
+    def test_tampered_envelope_rejected(self, real_executor, real_quote, changes, reason):
+        with pytest.raises(eth_mod.ZeroExQuoteRejected, match=reason):
+            self._check_tx(real_executor, with_changes(real_quote, changes))
+
+    @pytest.mark.parametrize("change, reason", [
+        ({"recipient": STRANGER}, "recipient"),
+        ({"buy_token": USDC}, "buyToken"),
+        ({"min_out": 11104989294834023 - 1}, "below our floor"),
+        ({"token": WETH}, "token/amount"),
+        ({"amount": REAL_SELL_AMOUNT + 1}, "token/amount"),
+        ({"target": STRANGER, "operator": STRANGER}, "neither Settler"),
+    ])
+    def test_tampered_calldata_rejected(self, real_executor, real_quote, change, reason):
+        data = retampered(real_quote["transaction"]["data"], **change)
+
+        with pytest.raises(eth_mod.ZeroExQuoteRejected, match=reason):
+            self._check_tx(real_executor, with_changes(real_quote, {"transaction__data": data}))
+
+    def test_retampering_helper_is_lossless(self, real_quote):
+        data = real_quote["transaction"]["data"]
+
+        assert retampered(data).lower() == data.lower()
+
+    def test_response_rejected_while_the_wallet_cannot_cover_the_sell(self, real_executor, real_quote):
+        assert real_quote["issues"]["balance"] is not None
+
+        with pytest.raises(eth_mod.ZeroExQuoteRejected, match="insufficient sell-token balance"):
+            real_executor._check_zerox_response(
+                real_quote, USDC, WETH, REAL_SELL_AMOUNT, REAL_REFERENCE_PRICE, firm=True)
+
+    def test_response_accepted_once_the_balance_issue_is_cleared(self, real_executor, real_quote):
+        real_quote["issues"]["balance"] = None
+
+        our_min = real_executor._check_zerox_response(
+            real_quote, USDC, WETH, REAL_SELL_AMOUNT, REAL_REFERENCE_PRICE, firm=True)
+
+        assert our_min == int(real_quote["minBuyAmount"])
+
+    def test_cleared_response_still_rejects_a_mismatched_order(self, real_executor, real_quote):
+        real_quote["issues"]["balance"] = None
+
+        with pytest.raises(eth_mod.ZeroExQuoteRejected, match="does not match"):
+            real_executor._check_zerox_response(
+                real_quote, USDC, WETH, REAL_SELL_AMOUNT + 1, REAL_REFERENCE_PRICE, firm=True)

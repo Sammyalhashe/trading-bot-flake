@@ -56,6 +56,9 @@ class NetworkConfig:
                 "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
                 "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
                 "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
+                "VVV": "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",    # Venice token
+                "AAVE": "0x63706e401c06ac8513145b7687A14804d17f814b",
+                "UNI": "0xc3De830EA07524a0761646a6a4e4be0e114a3C83",
             },
             known_decimals={
                 "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": 6,    # USDC
@@ -66,6 +69,9 @@ class NetworkConfig:
                 "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
                 "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
                 "0x6985884c4392d348587b19cb9eaaf157f13271cd": 18,   # ZRO
+                "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf": 18,   # VVV
+                "0x63706e401c06ac8513145b7687A14804d17f814b": 18,   # AAVE
+                "0xc3De830EA07524a0761646a6a4e4be0e114a3C83": 18,   # UNI
             },
             fee_tiers=[500, 3000, 10000],  # 0.05%, 0.30%, 1.00%
             slippage_bps=50,  # 0.5%

@@ -44,6 +44,7 @@ def test_executor_prices(product_ids=None):
         product_ids = ["BTC-USDC", "ETH-USDC", "LINK-USDC"]
 
     from executors.ethereum_executor import EthereumExecutor
+    from executors.log_redaction import url_host
 
     # Paper mode with dummy key
     rpc_url = os.environ.get('BASE_RPC_URL', 'https://mainnet.base.org')
@@ -53,7 +54,7 @@ def test_executor_prices(product_ids=None):
         'paper'
     )
 
-    print(f"Testing executor with RPC: {rpc_url}\n")
+    print(f"Testing executor with RPC: {url_host(rpc_url)}\n")
 
     for product_id in product_ids:
         print(f"Testing {product_id}...")

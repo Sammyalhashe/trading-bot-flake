@@ -2,7 +2,8 @@
 0x Swap API v2 (AllowanceHolder flow).
 
 Routers (ONCHAIN_ROUTER):
-  aerodrome  (default) Router.swapExactTokensForTokens with an on-chain quote.
+  aerodrome  (default) Router.swapExactTokensForTokens with an on-chain quote; approvals are
+             for the exact sell amount.
   zerox      0x is an off-chain quote source only. Responses must carry a valid 0x Ed25519
              signature, target the pinned AllowanceHolder, and exec() into the Settler that the
              on-chain registry names; approvals are for the exact sell amount. Tokens outside
@@ -45,6 +46,7 @@ from eth_abi.exceptions import DecodingError
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
+from .log_redaction import install_filter, redact, register_secret, register_url, url_host
 from .zerox_client import ZeroExClient, ZeroExError
 
 EXPECTED_CHAIN_ID = 8453  # Base Mainnet
@@ -122,6 +124,9 @@ TOKENS = {
     "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
     "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
     "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
+    "VVV": "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",    # Venice token
+    "AAVE": "0x63706e401c06ac8513145b7687A14804d17f814b",
+    "UNI": "0xc3De830EA07524a0761646a6a4e4be0e114a3C83",
 }
 
 # Dropped from TOKENS but possibly still held: symbol -> (address, dust threshold in raw units).
@@ -170,6 +175,9 @@ KNOWN_DECIMALS = {
     "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
     "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
     "0x6985884c4392d348587b19cb9eaaf157f13271cd": 18,   # ZRO
+    "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf": 18,   # VVV
+    "0x63706e401c06ac8513145b7687A14804d17f814b": 18,   # AAVE
+    "0xc3De830EA07524a0761646a6a4e4be0e114a3C83": 18,   # UNI
 }
 
 # Public endpoints: used only for balance reads, never for quotes or writes.
@@ -241,7 +249,7 @@ def retry_rpc_call(func, max_retries=4, base_delay=2.0):
 
             if attempt < max_retries - 1 and (is_rate_limit or is_timeout):
                 delay = base_delay * (2 ** attempt)
-                logging.warning(f"RPC call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s: {error_str[:100]}")
+                logging.warning(f"RPC call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s: {redact(error_str)[:100]}")
                 time.sleep(delay)
             else:
                 raise
@@ -260,12 +268,19 @@ class EthereumExecutor:
         self.onchain_router = ONCHAIN_ROUTER
         self.round_trip_fee_pct = ONCHAIN_ROUND_TRIP_FEE_PCT
         zerox_api_key = os.environ.get("ZEROX_API_KEY")
+        install_filter()
+        register_secret(zerox_api_key)
+        register_secret(private_key)
+        if private_key:
+            register_secret(private_key.removeprefix("0x"))
         self.zerox = ZeroExClient(zerox_api_key) if self.onchain_router == "zerox" and zerox_api_key else None
         if self.onchain_router == "zerox" and self.zerox is None:
             logging.error("ONCHAIN_ROUTER=zerox but ZEROX_API_KEY is not set: buys refused, exits use Aerodrome")
         self._allowance_holder_verified = False
         self.primary_rpc_url = rpc_url
         self.trusted_rpc_url = trusted_rpc_url or os.environ.get("BASE_TRUSTED_RPC_URL") or rpc_url
+        register_url(rpc_url)
+        register_url(self.trusted_rpc_url)
         self.private_key = private_key
         self.trading_mode = trading_mode
 
@@ -273,7 +288,6 @@ class EthereumExecutor:
         self._rpc_endpoints = [rpc_url] + [r for r in FALLBACK_RPCS if r != rpc_url]
 
         self._decimals_cache = {}
-        self._allowance_cache = {}
         self._reference_prices = {}
         self._next_nonce = None
         self._last_sent_hash = None
@@ -282,7 +296,7 @@ class EthereumExecutor:
 
         self.w3 = _make_web3(rpc_url)
         self.trusted_w3 = _make_web3(self.trusted_rpc_url)
-        logging.info(f"Read RPC: {rpc_url} | trusted (quotes/writes) RPC: {self.trusted_rpc_url}")
+        logging.info(f"Read RPC: {url_host(rpc_url)} | trusted (quotes/writes) RPC: {url_host(self.trusted_rpc_url)}")
         if trading_mode == "live" and self.trusted_rpc_url in FALLBACK_RPCS:
             logging.warning(
                 "Trusted RPC is a public endpoint; set BASE_TRUSTED_RPC_URL to a private RPC "
@@ -303,7 +317,7 @@ class EthereumExecutor:
         old_index = self._current_rpc_index
         self._current_rpc_index = (self._current_rpc_index + 1) % len(self._rpc_endpoints)
         new_rpc = self._rpc_endpoints[self._current_rpc_index]
-        logging.warning(f"Rotating read RPC from index {old_index} to {self._current_rpc_index}: {new_rpc}")
+        logging.warning(f"Rotating read RPC from index {old_index} to {self._current_rpc_index}: {url_host(new_rpc)}")
         self.w3 = _make_web3(new_rpc)
 
     def _call_with_failover(self, func):
@@ -320,7 +334,7 @@ class EthereumExecutor:
                 ])
                 if is_connection_error:
                     last_exception = e
-                    logging.warning(f"RPC connection error, attempting failover: {str(e)[:100]}")
+                    logging.warning(f"RPC connection error, attempting failover: {redact(str(e))[:100]}")
                     self._rotate_rpc()
                 else:
                     raise
@@ -615,27 +629,14 @@ class EthereumExecutor:
                 except: pass
         return None
 
-    def _approve_token(self, token_address, amount, spender=AERODROME_ROUTER_ADDRESS, exact=False):
-        """Approve spender (default the Aerodrome Router, for MAX) to spend tokens. exact=True
-        approves only `amount` and always reads the live allowance. Returns True if already
-        approved, the approval tx hash (hex) if one was mined, or None on failure."""
+    def _approve_token(self, token_address, amount, spender=AERODROME_ROUTER_ADDRESS):
+        """Approve spender (default the Aerodrome Router) for exactly `amount`, always reading the
+        live allowance. Returns True if already approved, the approval tx hash (hex) if one was
+        mined, or None on failure."""
         if self.trading_mode != "live" or not self.account:
             return True
 
-        addr_lower = token_address.lower()
-        cache_key = f"{addr_lower}:{self.account.address}"
         spender = Web3.to_checksum_address(spender)
-        approve_amount = amount if exact else 2**256 - 1
-        label = str(amount) if exact else "MAX"
-
-        if not exact and cache_key in self._allowance_cache:
-            cached_allowance = self._allowance_cache[cache_key]
-            if cached_allowance == 2**256 - 1:
-                logging.info(f"Using cached MAX approval for {token_address}")
-                return True
-            if cached_allowance >= amount:
-                logging.info(f"Using cached allowance for {token_address}: {cached_allowance}")
-                return True
 
         try:
             token_contract = self.trusted_w3.eth.contract(
@@ -646,8 +647,6 @@ class EthereumExecutor:
             allowance = retry_rpc_call(
                 lambda: token_contract.functions.allowance(self.account.address, spender).call()
             )
-            if not exact:
-                self._allowance_cache[cache_key] = allowance
             logging.info(f"Current allowance for {token_address} on {spender}: {allowance}")
 
             if allowance >= amount:
@@ -655,23 +654,21 @@ class EthereumExecutor:
 
             # Some tokens (like USDT) require resetting to 0 first if allowance is non-zero
             if allowance > 0:
-                logging.info(f"Resetting allowance for {token_address} from {allowance} to 0 before {label} approval")
+                logging.info(f"Resetting allowance for {token_address} from {allowance} to 0 before approving {amount}")
                 reset_hash = self._send_contract_tx(token_contract.functions.approve(spender, 0))
                 status, _ = self._await_receipt(reset_hash, RECEIPT_TIMEOUT_SECONDS)
                 if status != "confirmed":
                     logging.error(f"Allowance reset not confirmed ({status}). Tx: {reset_hash.hex()}")
                     return None
 
-            logging.info(f"Approving {label} of {token_address} for {spender}")
-            approve_hash = self._send_contract_tx(token_contract.functions.approve(spender, approve_amount))
+            logging.info(f"Approving {amount} of {token_address} for {spender}")
+            approve_hash = self._send_contract_tx(token_contract.functions.approve(spender, amount))
             status, receipt = self._await_receipt(approve_hash, RECEIPT_TIMEOUT_SECONDS)
 
             if status == "confirmed":
-                logging.info(f"Approved {label} for {token_address}. Tx: {approve_hash.hex()}")
-                if not exact:
-                    self._allowance_cache[cache_key] = 2**256 - 1
+                logging.info(f"Approved {amount} for {token_address}. Tx: {approve_hash.hex()}")
                 return approve_hash.hex()
-            logging.error(f"Approve {label} not confirmed ({status}): {receipt}")
+            logging.error(f"Approve {amount} not confirmed ({status}): {receipt}")
             return None
         except KillSwitchEngaged:
             raise
@@ -882,7 +879,7 @@ class EthereumExecutor:
                 indicative = self._zerox_request("price", token_in, token_out, amount_in)
                 self._check_zerox_response(indicative, token_in, token_out, amount_in, reference_price, firm=False)
 
-                if self._approve_token(token_in, amount_in, spender=ALLOWANCE_HOLDER_ADDRESS, exact=True) is None:
+                if self._approve_token(token_in, amount_in, spender=ALLOWANCE_HOLDER_ADDRESS) is None:
                     logging.error(f"Token approval failed for {token_in}, cannot execute swap")
                     return {"success": False, "error": "approval failed"}
 

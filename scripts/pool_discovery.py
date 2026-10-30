@@ -13,6 +13,7 @@ Consolidates functionality from:
 import os
 import sys
 import time
+from urllib.parse import urlsplit
 from web3 import Web3
 from decimal import Decimal
 
@@ -79,9 +80,9 @@ def connect_to_base() -> Web3:
     w3 = Web3(Web3.HTTPProvider(rpc_url))
 
     if not w3.is_connected():
-        raise ConnectionError(f"Failed to connect to Base RPC: {rpc_url}")
+        raise ConnectionError(f"Failed to connect to Base RPC: {urlsplit(rpc_url).hostname}")
 
-    print(f"✓ Connected to Base ({rpc_url})")
+    print(f"✓ Connected to Base ({urlsplit(rpc_url).hostname})")
     return w3
 
 

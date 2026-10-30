@@ -9,6 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from executors.ethereum_executor import EthereumExecutor, TOKENS
+from executors.log_redaction import url_host
 from web3 import Web3
 
 def main():
@@ -35,7 +36,7 @@ def main():
     trading_mode = 'live'  # force live for this test
     
     print("=== Ethereum Executor Live Swap Test ===")
-    print(f"RPC: {rpc_url}")
+    print(f"RPC: {url_host(rpc_url)}")
     print(f"Mode: {trading_mode}")
     
     executor = EthereumExecutor(rpc_url, private_key, trading_mode)

@@ -54,6 +54,17 @@ def _install_router(executor, quote_for_routes):
     return router, swap_fn
 
 
+def _install_token(executor, allowance):
+    """Mock ERC20 behind the trusted RPC; the allowance read is what _approve_token acts on."""
+    token = MagicMock()
+    token.functions.allowance.return_value.call.return_value = allowance
+    approve_fn = token.functions.approve.return_value
+    approve_fn.estimate_gas.return_value = 50_000
+    approve_fn.build_transaction.side_effect = lambda params: {**params, "to": Web3.to_checksum_address(USDC), "data": "0x095ea7b3"}
+    executor.trusted_w3.eth.contract.return_value = token
+    return token
+
+
 @pytest.fixture
 def nonces():
     return {"pending": 7, "latest": 7}
@@ -76,8 +87,7 @@ def executor(monkeypatch, tmp_path, nonces):
     eth.send_raw_transaction.side_effect = lambda raw: Web3.keccak(raw)
     eth.wait_for_transaction_receipt.return_value = AttributeDict({"status": 1, "gasUsed": 150_000})
 
-    for token in (USDC, WETH):
-        ex._allowance_cache[f"{token.lower()}:{ex.account.address}"] = 2**256 - 1
+    _install_token(ex, allowance=2**256 - 1)
     return ex
 
 
@@ -217,19 +227,13 @@ class TestNonceHandling:
         assert used == [7, 8]
 
     def test_approval_then_swap_use_consecutive_nonces_and_requote(self, executor):
-        executor._allowance_cache.clear()
         router, swap_fn = _install_router(executor, _best_direct_volatile)
-        token = MagicMock()
-        token.functions.allowance.return_value.call.return_value = 0
-        approve_fn = token.functions.approve.return_value
-        approve_fn.estimate_gas.return_value = 50_000
-        approve_fn.build_transaction.side_effect = lambda params: {**params, "to": Web3.to_checksum_address(USDC), "data": "0x095ea7b3"}
-        executor.trusted_w3.eth.contract.return_value = token
+        token = _install_token(executor, allowance=0)
 
         result = executor.execute_swap(USDC, WETH, 10 * 10**6, executor.account.address)
 
         assert result["success"] is True
-        token.functions.approve.assert_called_once_with(Web3.to_checksum_address(AERODROME_ROUTER_ADDRESS), 2**256 - 1)
+        approve_fn = token.functions.approve.return_value
         assert approve_fn.build_transaction.call_args[0][0]["nonce"] == 7
         assert swap_fn.build_transaction.call_args[0][0]["nonce"] == 8
         assert router.functions.getAmountsOut.call_count == 2 * len(executor._candidate_routes(USDC, WETH))
@@ -361,6 +365,87 @@ class TestReceiptReconciliation:
 
         assert result["success"] is True
         assert swap_fn.build_transaction.call_count == 1
+
+
+class TestExactApproval:
+    ROUTER = Web3.to_checksum_address(AERODROME_ROUTER_ADDRESS)
+    AMOUNT = 10 * 10**6
+
+    def _buy(self, executor):
+        return executor.execute_swap(USDC, WETH, self.AMOUNT, executor.account.address)
+
+    def test_approves_exactly_the_sell_amount_never_max(self, executor):
+        _install_router(executor, _best_direct_volatile)
+        token = _install_token(executor, allowance=0)
+
+        assert self._buy(executor)["success"] is True
+
+        token.functions.approve.assert_called_once_with(self.ROUTER, self.AMOUNT)
+
+    def test_nonzero_shortfall_is_reset_to_zero_first(self, executor):
+        _, swap_fn = _install_router(executor, _best_direct_volatile)
+        token = _install_token(executor, allowance=5)
+
+        assert self._buy(executor)["success"] is True
+
+        assert [c.args for c in token.functions.approve.call_args_list] == [(self.ROUTER, 0), (self.ROUTER, self.AMOUNT)]
+        assert [c.args[0]["nonce"] for c in token.functions.approve.return_value.build_transaction.call_args_list] == [7, 8]
+        assert swap_fn.build_transaction.call_args[0][0]["nonce"] == 9
+
+    @pytest.mark.parametrize("existing", [AMOUNT, AMOUNT * 3])
+    def test_existing_allowance_at_or_above_amount_is_reused_without_a_tx(self, executor, existing):
+        _, swap_fn = _install_router(executor, _best_direct_volatile)
+        token = _install_token(executor, allowance=existing)
+
+        assert self._buy(executor)["success"] is True
+
+        token.functions.approve.assert_not_called()
+        assert executor.trusted_w3.eth.send_raw_transaction.call_count == 1
+        assert swap_fn.build_transaction.call_args[0][0]["nonce"] == 7
+
+    def test_no_allowance_is_remembered_between_swaps(self, executor):
+        _install_router(executor, _best_direct_volatile)
+        token = _install_token(executor, allowance=0)
+
+        self._buy(executor)
+        self._buy(executor)
+
+        assert token.functions.allowance.return_value.call.call_count == 2
+        assert [c.args for c in token.functions.approve.call_args_list] == [(self.ROUTER, self.AMOUNT)] * 2
+
+    @pytest.mark.parametrize("allowance", [0, 5])
+    def test_unconfirmed_approval_or_reset_aborts_without_a_swap(self, executor, allowance):
+        router, swap_fn = _install_router(executor, _best_direct_volatile)
+        _install_token(executor, allowance=allowance)
+        executor.trusted_w3.eth.wait_for_transaction_receipt.side_effect = [AttributeDict({"status": 0})]
+
+        result = self._buy(executor)
+
+        assert result == {"success": False, "error": "approval failed"}
+        swap_fn.build_transaction.assert_not_called()
+        assert executor.trusted_w3.eth.send_raw_transaction.call_count == 1
+
+    def test_kill_switch_engaged_after_approval_blocks_the_swap(self, executor, tmp_path):
+        _, swap_fn = _install_router(executor, _best_direct_volatile)
+        _install_token(executor, allowance=0)
+
+        def approval_mined(*args, **kwargs):
+            (tmp_path / "kill").touch()
+            return AttributeDict({"status": 1, "gasUsed": 50_000})
+        executor.trusted_w3.eth.wait_for_transaction_receipt.side_effect = approval_mined
+
+        result = self._buy(executor)
+
+        assert result == {"success": False, "error": "kill switch engaged"}
+        assert executor.trusted_w3.eth.send_raw_transaction.call_count == 1
+
+    def test_kill_switch_is_checked_before_any_allowance_read(self, executor, tmp_path):
+        _install_router(executor, _best_direct_volatile)
+        token = _install_token(executor, allowance=0)
+        (tmp_path / "kill").touch()
+
+        assert self._buy(executor) == {"success": False, "error": "kill switch engaged"}
+        token.functions.approve.assert_not_called()
 
 
 class TestKillSwitchAndCap:

@@ -353,3 +353,55 @@ class TestClientHttp:
         c.quote(PARAMS)
 
         assert sleeps and sleeps[0] == pytest.approx(zx.MIN_REQUEST_INTERVAL_SECONDS - 0.05)
+
+
+REAL_QUOTE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "zerox_real_quote_usdc_weth.json")
+
+
+@pytest.fixture(scope="module")
+def real():
+    with open(REAL_QUOTE_PATH) as f:
+        fixture = json.load(f)
+    fixture["body"] = base64.b64decode(fixture.pop("body_b64"))
+    return fixture
+
+
+def verify_real(real, headers=None, body=None, url=None, status=None, now=None):
+    return verify_response_signature(
+        real["method"], url or real["url"], status or real["status"],
+        requests.structures.CaseInsensitiveDict(headers or real["headers"]),
+        real["body"] if body is None else body,
+        now=real["signature_created"] if now is None else now,
+    )
+
+
+class TestRealCapturedResponse:
+    """A live, signed Base quote verified against the pinned production key; fully offline."""
+
+    def test_verifies_against_the_pinned_production_key(self, real):
+        assert verify_real(real)["keyid"] == "0x-signing-key-prod-24092026"
+
+    def test_header_names_are_case_insensitive(self, real):
+        headers = {name.upper(): value for name, value in real["headers"].items()}
+
+        assert verify_real(real, headers=headers)["keyid"] == "0x-signing-key-prod-24092026"
+
+    def test_one_changed_body_byte_rejected(self, real):
+        body = bytearray(real["body"])
+        body[-1] ^= 0x01
+
+        with pytest.raises(SignatureVerificationError, match="Content-Digest"):
+            verify_real(real, body=bytes(body))
+
+    def test_altered_sell_amount_in_the_query_rejected(self, real):
+        assert "sellAmount=25000000" in real["url"]
+
+        with pytest.raises(SignatureVerificationError, match="invalid"):
+            verify_real(real, url=real["url"].replace("sellAmount=25000000", "sellAmount=26000000"))
+
+    def test_signature_older_than_the_skew_window_rejected(self, real):
+        with pytest.raises(SignatureVerificationError, match="fresh"):
+            verify_real(real, now=real["signature_created"] + 61)
+
+    def test_signature_at_the_edge_of_the_skew_window_accepted(self, real):
+        assert verify_real(real, now=real["signature_created"] + 60)
