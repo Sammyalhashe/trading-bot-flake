@@ -52,10 +52,8 @@ class NetworkConfig:
                 "USDC.e": "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca", # Bridged USDC
                 "WETH": "0x4200000000000000000000000000000000000006",
                 "BTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",    # WBTC
-                "DEGEN": "0x4ed4E281562193f5C8c11259D3e21839951e7d23",
                 "AERO": "0x9401811A062933285c64D72A25e8e3cf24f3fFBE",
                 "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
-                "TOSHI": "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4",  # Toshi cat meme coin
                 "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
                 "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
             },
@@ -64,10 +62,8 @@ class NetworkConfig:
                 "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": 6,    # USDC.e
                 "0x4200000000000000000000000000000000000006": 18,   # WETH
                 "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c": 8,    # WBTC
-                "0x4ed4E281562193f5C8c11259D3e21839951e7d23": 18,   # DEGEN
                 "0x9401811A062933285c64D72A25e8e3cf24f3fFBE": 18,   # AERO
                 "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
-                "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4": 18,   # TOSHI
                 "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
                 "0x6985884c4392d348587b19cb9eaaf157f13271cd": 18,   # ZRO
             },
