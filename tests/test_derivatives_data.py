@@ -42,6 +42,10 @@ def make_config(**overrides):
         max_concurrent_positions=3, ws_scan_interval=300,
         asset_blacklist=[], momentum_window_hours=24, top_momentum_count=3,
         asset_mapping={},
+        atr_stop_multiplier=2.5, atr_stop_min_pct=0.06, atr_stop_max_pct=0.15,
+        stopout_cooldown_hours=12.0,
+        enable_futures=False, futures_leverage=1,
+        futures_round_trip_fee_pct=Decimal("0.0006"),
     )
     defaults.update(overrides)
     return TradingConfig(**defaults)

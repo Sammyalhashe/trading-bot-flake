@@ -11,6 +11,9 @@ on:
       - 'executors/**'
       - 'backtesting/**'
       - 'tests/**'
+      - 'nix/**'
+      - 'flake.nix'
+      - 'flake.lock'
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -18,18 +21,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install requests pandas numpy pyjwt cryptography pytest web3 websockets loguru
+      # Same pinned Python environment the deployed bot runs with (flake.lock),
+      # instead of whatever pip resolves today.
+      - uses: cachix/install-nix-action@v27
 
       - name: Run tests
-        run: python -m pytest tests/ -v --tb=short
+        run: nix develop --impure -c python3 -X faulthandler -m pytest tests/ -v --tb=short -p no:cacheprovider -o faulthandler_timeout=120
 
   backtest:
     needs: test
