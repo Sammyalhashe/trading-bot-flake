@@ -55,3 +55,42 @@ def test_sell_notification_escapes_html_in_reason():
     assert "&lt; stop" in msg
     assert "< stop" not in msg
     assert msg.startswith("<b>SELL UNI</b>")
+
+
+def test_pnl_report_escapes_trade_reasons():
+    import pnl_report
+    trade_log = MagicMock()
+    trade_log.query.return_value = [{
+        "timestamp": "2026-10-29T16:04:35", "asset": "TIA", "pnl": -20.03,
+        "reason": "Trailing stop-loss triggered for TIA (price $0.53 < stop $0.53)",
+    }]
+    state_manager = MagicMock()
+    state_manager.get_performance.return_value = {}
+    state_manager.load_state.return_value = {}
+    with patch.object(pnl_report, "ExecutorConfig"), \
+         patch.object(pnl_report, "StateManager", return_value=state_manager), \
+         patch.object(pnl_report, "TradeLog", return_value=trade_log), \
+         patch.object(pnl_report, "get_all_balances",
+                      return_value={"cash": {"USD": 0.0, "USDC": 100.0}, "crypto": {}}):
+        report, _ = pnl_report.build_report()
+
+    assert "&lt; stop" in report
+    assert "< stop" not in report
+
+
+def test_regime_alert_escapes_report_content(tmp_path):
+    import notify_telegram
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("BTC MA21 < MA55 & falling")
+    state = {"last_status": "BEAR", "regime_changes": 0, "bullish_changes": 0,
+             "bearish_changes": 0, "transactions": []}
+    with patch.object(notify_telegram, "REPORT_FILE", str(report_file)), \
+         patch.object(notify_telegram, "load_market_state", return_value=state), \
+         patch.object(notify_telegram, "save_market_state"), \
+         patch.object(notify_telegram, "extract_market_status", return_value=("BULL", None, None)), \
+         patch.object(notify_telegram, "send_telegram_message") as send:
+        notify_telegram.main()
+
+    msg = send.call_args[0][0]
+    assert msg.startswith("<pre>") and msg.endswith("</pre>")
+    assert "MA21 &lt; MA55 &amp; falling" in msg

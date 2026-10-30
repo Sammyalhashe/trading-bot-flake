@@ -6,6 +6,7 @@ Sends a Telegram summary and writes a JSON snapshot other tools (e.g. the
 hermes agent) can read for on-demand questions.
 """
 import os
+import html
 import json
 import time
 import secrets
@@ -142,7 +143,7 @@ def build_report() -> tuple[str, dict]:
         lines.append(f"<b>Open Positions</b> (unrealized: ${unrealized_total:+,.2f})")
         for p in open_positions:
             lines.append(
-                f"  {p['asset']}: {p['qty']:.4f} @ ${p['entry']:,.2f} -> ${p['current']:,.2f} "
+                f"  {p['asset']}: {p['qty']:.4f} @ ${p['entry']:,.2f} → ${p['current']:,.2f} "
                 f"({'+' if p['unrealized_usd'] >= 0 else ''}${p['unrealized_usd']:,.2f}, "
                 f"{p['unrealized_pct']:+.2f}%)"
             )
@@ -168,7 +169,7 @@ def build_report() -> tuple[str, dict]:
             pnl = t.get("pnl") or 0.0
             lines.append(
                 f"  {t['timestamp']}: {t['asset']} PnL {'+' if pnl >= 0 else ''}${pnl:,.2f} "
-                f"({t.get('reason') or '-'})"
+                f"({html.escape(t.get('reason') or '-')})"
             )
 
     report_text = "\n".join(lines)
@@ -190,7 +191,7 @@ def build_report() -> tuple[str, dict]:
 
 def main():
     report_text, snapshot = build_report()
-    print(report_text.replace("<b>", "").replace("</b>", ""))
+    print(html.unescape(report_text.replace("<b>", "").replace("</b>", "")))
 
     SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = SNAPSHOT_FILE.with_suffix(".tmp")

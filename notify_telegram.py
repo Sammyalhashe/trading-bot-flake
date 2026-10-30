@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import html
 import json
 import sys
 from datetime import datetime
@@ -165,7 +166,7 @@ def main():
             extra += "\nRecent regime changes:" + "".join([
                 f"\n- {tx['time']}: {tx['detail']}" for tx in recent_tx
             ])
-        full_message = f"<pre>{report_content}{extra}</pre>"
+        full_message = f"<pre>{html.escape(report_content + extra)}</pre>"
         print(f"Regime change detected: {change_type}. Sending notification...")
         send_telegram_message(full_message)
     else:
