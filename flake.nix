@@ -99,7 +99,7 @@
             chmod +x $out/bin/backtesting/collect_derivatives_data.py
             ln -s $out/bin/backtesting/collect_derivatives_data.py $out/bin/collect-derivatives
             wrapProgram $out/bin/backtesting/collect_derivatives_data.py \
-              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv pkgs.curl ]} \
               --set PYTHONPATH $out/bin
           '';
         };
@@ -185,5 +185,7 @@ EOF
         };
       }) // {
         nixosModules.default = import ./modules/sops.nix;
+        homeManagerModules.default = import ./nix/hm-module.nix self;
+        homeModules.default = self.homeManagerModules.default;
       };
 }

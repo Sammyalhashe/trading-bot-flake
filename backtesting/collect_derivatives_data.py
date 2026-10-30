@@ -9,6 +9,7 @@ on timestamp, so running it more often or after a missed day is always safe.
 Usage:
     python backtesting/collect_derivatives_data.py
 """
+import os
 import sys
 import subprocess
 import json
@@ -16,7 +17,8 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent.parent / "data" / "derivatives"
+# Overridable because the packaged script lives in the read-only Nix store.
+OUTPUT_DIR = Path(os.environ.get("DERIVATIVES_DATA_DIR", Path(__file__).parent.parent / "data" / "derivatives"))
 OKX_BASE = "https://www.okx.com/api/v5"
 
 
