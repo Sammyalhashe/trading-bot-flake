@@ -116,6 +116,32 @@ in
       coinbaseApiJson = apiJsonOption "COINBASE_API_JSON for coinbase-trader-ws.";
     };
 
+    paper = {
+      enable = mkEnableOption "a paper-trading WebSocket bot with a simulated ledger (coinbase-trader-paper)";
+      startingCash = mkOption {
+        type = types.ints.positive;
+        default = 10000;
+        description = "Simulated USDC the paper ledger starts with (PAPER_STARTING_CASH).";
+      };
+      coinbaseApiJson = apiJsonOption "COINBASE_API_JSON for the paper bot (read-only: prices and candles).";
+      settings = mkOption {
+        type = types.attrsOf (
+          types.oneOf [
+            types.str
+            types.int
+            types.float
+            types.bool
+          ]
+        );
+        default = { };
+        example = {
+          STRATEGY = "daily_trend";
+          DAILY_TREND_FILTER = "sma:50";
+        };
+        description = "Environment for the paper bot only; the shared `settings` are not applied to it.";
+      };
+    };
+
     timer = {
       autoStart = mkEnableOption "the 3-minute timer fallback (coinbase-trader.timer) at login";
       coinbaseApiJson = apiJsonOption "COINBASE_API_JSON for the timer-mode bot.";
@@ -164,9 +190,15 @@ in
   };
 
   config = mkIf cfg.enable {
-    home.packages = mkIf cfg.ws.enable [
-      (pkgs.writeShellScriptBin "trading-botctl" ''exec ${bin "trading-botctl"} "$@"'')
-    ];
+    home.packages =
+      lib.optional cfg.ws.enable (
+        pkgs.writeShellScriptBin "trading-botctl" ''exec ${bin "trading-botctl"} "$@"''
+      )
+      ++ lib.optional cfg.paper.enable (
+        pkgs.writeShellScriptBin "trading-botctl-paper" ''
+          TRADING_BOT_SOCKET="$XDG_RUNTIME_DIR/trading-bot-paper.sock" exec ${bin "trading-botctl"} "$@"
+        ''
+      );
 
     systemd.user.services = {
       coinbase-trader-ws = mkIf cfg.ws.enable {
@@ -183,6 +215,33 @@ in
           RestartSec = "10s";
           Environment = environmentWith cfg.ws.coinbaseApiJson [ ];
           EnvironmentFile = cfg.environmentFiles;
+          ExecStartPre = waitForCoinbase;
+          ExecStart = "${bin "trading-bot"} --ws";
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+
+      coinbase-trader-paper = mkIf cfg.paper.enable {
+        Unit = networkOnline // {
+          Description = "Coinbase Trading Bot (paper ledger)";
+        };
+        Service = {
+          Type = "simple";
+          Restart = "on-failure";
+          RestartSec = "10s";
+          # Own state, log and socket so it never shares files or the run lock with the live bot.
+          Environment = [
+            "TRADING_MODE=paper"
+            "ENABLE_ETHEREUM=false"
+            "COINBASE_API_JSON=${cfg.paper.coinbaseApiJson}"
+            "PAPER_STARTING_CASH=${toString cfg.paper.startingCash}"
+            "TRADING_STATE_FILE=%h/.local/state/trading-bot-paper/trading_state.json"
+            "TRADING_LOG_FILE=%h/.local/state/trading-bot-paper/trading.log"
+            "TRADING_BOT_SOCKET=%t/trading-bot-paper.sock"
+            "CONTROL_TELEGRAM=false"
+            "NOTIFY_PREFIX=PAPER"
+          ]
+          ++ lib.mapAttrsToList (name: value: "${name}=${renderValue value}") cfg.paper.settings;
           ExecStartPre = waitForCoinbase;
           ExecStart = "${bin "trading-bot"} --ws";
         };

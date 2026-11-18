@@ -32,6 +32,9 @@ def send_telegram_message(message, parse_mode="HTML"):
     if not token:
         return False
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "8555669756")
+    prefix = os.environ.get("NOTIFY_PREFIX")
+    if prefix:
+        message = f"[{html.escape(prefix)}] {message}"
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode}
     try:

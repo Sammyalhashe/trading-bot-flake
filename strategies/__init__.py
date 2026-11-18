@@ -27,5 +27,8 @@ def create_strategy(name: str, ta: TechnicalAnalysis, config: TradingConfig) -> 
     elif name == "mtf_trend":
         from strategies.mtf_trend import MTFTrendStrategy
         return MTFTrendStrategy(ta, config)
+    elif name == "daily_trend":
+        from strategies.daily_trend import DailyTrendStrategy
+        return DailyTrendStrategy(ta, config)
     else:
         raise ValueError(f"Unknown strategy: {name}")

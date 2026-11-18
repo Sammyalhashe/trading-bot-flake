@@ -826,6 +826,7 @@ class TestWebSocketTickExit:
 
     def _executor(self, balances=REAL_SHAPE):
         executor = MagicMock()
+        executor.__class__.__name__ = "CoinbaseExecutor"
         executor.get_balances.return_value = balances
         executor.get_market_data.return_value = make_candle_df(200.0)
         executor.get_supported_assets.return_value = ["BTC"]

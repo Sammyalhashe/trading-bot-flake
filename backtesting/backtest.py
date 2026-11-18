@@ -73,6 +73,7 @@ class BacktestEngine:
             enable_btc_dominance=False  # Disabled for backtesting
         )
         self.current_time = None
+        self.daily = {}  # asset -> daily candles, for strategies that need "1d"
         self.risk_manager = RiskManager(config, initial_capital,
                                         clock=lambda: self.current_time.timestamp())
 
@@ -131,6 +132,11 @@ class BacktestEngine:
             "supertrend": create_strategy("supertrend", self.ta, self.config),
             "mtf_trend": create_strategy("mtf_trend", self.ta, self.config),
         }
+        if strategy_name != "auto" and strategy_name not in strategies:
+            strategies[strategy_name] = create_strategy(strategy_name, self.ta, self.config)
+        if any("1d" in s.required_timeframes for s in strategies.values() if strategy_name in ("auto", s.name)):
+            self.daily = {asset: self._load_daily(path, datasets[asset])
+                          for asset, path in zip(datasets, data_files)}
 
         # Iterate on BTC's timeline, which also drives the regime as in live trading
         clock_df = datasets["BTC"]
@@ -196,12 +202,33 @@ class BacktestEngine:
         results = self._calculate_metrics(strategy_name)
         return results
 
-    def _build_market_data(self, strategy, df):
+    def _load_daily(self, hourly_path, hourly_df) -> pd.DataFrame:
+        """Daily candles: the sibling 1d file when present (longer warm-up), else resampled hourly bars."""
+        daily_path = Path(hourly_path).parent.parent / "1d" / Path(hourly_path).name.replace("_1h_", "_1d_")
+        if daily_path.exists():
+            return self.load_data(str(daily_path))
+        return (hourly_df.set_index("timestamp")
+                .resample("1D").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                .dropna().reset_index())
+
+    def _daily_slice(self, asset, timestamp) -> pd.DataFrame:
+        """Daily candles closed by the end of the hourly bar starting at `timestamp` (no look-ahead)."""
+        days = self.daily.get(asset)
+        if days is None:
+            return None
+        # A day starting at D closes at D+24h; the bar starting at t closes at t+1h.
+        end = days["timestamp"].searchsorted(timestamp - pd.Timedelta(hours=23), side="right")
+        return days.iloc[max(0, end - 400):end]
+
+    def _build_market_data(self, strategy, df, asset=None, timestamp=None):
         """Build market_data dict from a single DataFrame for the strategy.
 
         For single-TF strategies: {"1h": df}
         For MTF strategies needing 15m: {"1h": resampled_1h, "15m": df}
+        For daily strategies: {"1d": closed daily candles}
         """
+        if "1d" in strategy.required_timeframes:
+            return {"1d": self._daily_slice(asset, timestamp), "1h": df}
         if "15m" in strategy.required_timeframes and "1h" in strategy.required_timeframes:
             # Data is at 15m granularity; resample up to 1h for the "1h" key
             df_indexed = df.set_index("timestamp") if "timestamp" in df.columns else df.set_index("start")
@@ -234,7 +261,7 @@ class BacktestEngine:
             pos['hwm'] = max(pos['hwm'], bar['high'], price)
 
             # Check exit conditions
-            market_data = self._build_market_data(strategy, df)
+            market_data = self._build_market_data(strategy, df, asset, timestamp)
             should_exit, sell_ratio, reason, new_tp_flags = strategy.check_exit(
                 asset=asset.split('-')[0],  # BTC-USD -> BTC
                 product_id=asset,
@@ -299,7 +326,7 @@ class BacktestEngine:
             if self._in_stopout_cooldown(asset, timestamp):
                 continue
 
-            market_data = self._build_market_data(strategy, df)
+            market_data = self._build_market_data(strategy, df, asset, timestamp)
             candidate = strategy.scan_entry(
                 asset=asset.split('-')[0],
                 product_id=asset,
@@ -327,21 +354,20 @@ class BacktestEngine:
             target_allocation = portfolio_value / max_concurrent_positions
 
             # Scale down in BEAR regime
-            if market_regime == "BEAR" and self.config.bear_position_scale < 1.0:
+            if (market_regime == "BEAR" and self.config.bear_position_scale < 1.0
+                    and getattr(strategy, "uses_hourly_regime", True)):
                 target_allocation *= self.config.bear_position_scale
                 if target_allocation < 10:
                     continue  # Skip tiny allocations
 
-            position_size = target_allocation / price
-            cost = position_size * price
-
-            # Calculate buy fee (half of round-trip)
+            # Like live, buy what available cash allows (keeping a 5% buffer) instead of skipping
+            fee_rate = self.risk_manager.calculate_fees(1.0, is_round_trip=False)
+            cost = min(target_allocation, self.capital * 0.95 / (1 + fee_rate))
+            if cost < 10:
+                continue
+            position_size = cost / price
             buy_fee = self.risk_manager.calculate_fees(cost, is_round_trip=False)
             total_cost = cost + buy_fee
-
-            # Check if we have enough capital
-            if total_cost > self.capital * 0.95:  # Leave 5% buffer
-                continue
 
             # Open position (deduct cost + fee)
             self.capital -= total_cost

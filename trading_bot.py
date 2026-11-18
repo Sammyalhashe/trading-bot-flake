@@ -223,6 +223,16 @@ def available_crypto(balances):
         return balances["available"].get("crypto", {})
     return balances.get("crypto", {})
 
+def make_coinbase_executor():
+    """The Coinbase executor, wrapped in a simulated ledger for paper runs with PAPER_STARTING_CASH."""
+    executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+    starting_cash = os.environ.get("PAPER_STARTING_CASH")
+    if TRADING_MODE == "paper" and starting_cash:
+        from executors.paper_executor import PaperLedgerExecutor
+        return PaperLedgerExecutor(executor, STATE_FILE.with_suffix(".paper.json"), float(starting_cash),
+                                   float(os.environ.get("PAPER_FEE_PER_SIDE", "0.0011")))
+    return executor
+
 def usdc_product_id(product_id):
     """Coinbase merged USD/USDC books; the WS ticker reports BTC-USD for a BTC-USDC subscription."""
     return product_id + "C" if product_id.endswith("-USD") else product_id
@@ -640,7 +650,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 atr=atr
             )
             # Scale down position in BEAR regime
-            if market_regime == "BEAR" and config.bear_position_scale < 1.0:
+            if market_regime == "BEAR" and config.bear_position_scale < 1.0 and getattr(strategy, "uses_hourly_regime", True):
                 bear_cap = config.bear_position_scale * ex_value / max(1, max_positions)
                 buy_size = min(buy_size * config.bear_position_scale,
                                max(0.0, bear_cap - current_asset_value))
@@ -900,7 +910,7 @@ def run_bot(reset_to_usdc=False):
         release_run_lock()
 
 def _run_bot(reset_to_usdc=False):
-    cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+    cb_executor = make_coinbase_executor()
     active_executors = [cb_executor]
 
     if ENABLE_ETHEREUM:
@@ -1102,7 +1112,8 @@ def run_ws_mode():
         logging.warning("Another bot instance is already running, exiting.")
         return
     try:
-        cb_executor = CoinbaseExecutor(API_JSON_FILE, TRADING_MODE)
+        cb_executor = make_coinbase_executor()
+        ws_ex_id = cb_executor.__class__.__name__
 
         # In-memory snapshots refreshed each scan cycle — ticks never hit
         # the filesystem or REST API unless an exit is actually triggered.
@@ -1116,7 +1127,7 @@ def run_ws_mode():
 
         def _refresh_snapshots():
             """Reload state, balances, and candles from source of truth."""
-            ex_id = "CoinbaseExecutor"
+            ex_id = ws_ex_id
             # Do all I/O outside the lock to avoid blocking on_tick.
             state = load_state()
             bal = cb_executor.get_balances()
@@ -1144,7 +1155,7 @@ def run_ws_mode():
         _tick_retry_after = {}  # product_id -> epoch; throttles retries after a failed tick exit
 
         def on_tick(product_id, price):
-            ex_id = "CoinbaseExecutor"
+            ex_id = ws_ex_id
             product_id = usdc_product_id(product_id)
             entry_key = f"{ex_id}:{product_id}"
 

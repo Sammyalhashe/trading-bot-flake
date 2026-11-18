@@ -85,6 +85,13 @@ class TradingConfig:
     # Asset Mapping (for rebranded/bridged tokens)
     asset_mapping: dict[str, str]
 
+    # Daily trend strategy (STRATEGY=daily_trend)
+    daily_trend_assets: str = "BTC"
+    daily_trend_filter: str = "sma:50"
+    daily_trend_buffer_pct: float = 0.0
+    daily_trend_confirm_days: int = 1
+    daily_trend_stop_pct: float = 0.0
+
     @classmethod
     def from_env(cls) -> 'TradingConfig':
         """Load configuration from environment variables"""
@@ -134,6 +141,11 @@ class TradingConfig:
             atr_stop_min_pct=float(os.getenv("ATR_STOP_MIN_PCT", "0.06")),
             atr_stop_max_pct=float(os.getenv("ATR_STOP_MAX_PCT", "0.15")),
             stopout_cooldown_hours=float(os.getenv("STOPOUT_COOLDOWN_HOURS", "12")),
+            daily_trend_assets=os.getenv("DAILY_TREND_ASSETS", "BTC"),
+            daily_trend_filter=os.getenv("DAILY_TREND_FILTER", "sma:50"),
+            daily_trend_buffer_pct=float(os.getenv("DAILY_TREND_BUFFER_PCT", "0")),
+            daily_trend_confirm_days=int(os.getenv("DAILY_TREND_CONFIRM_DAYS", "1")),
+            daily_trend_stop_pct=float(os.getenv("DAILY_TREND_STOP_PCT", "0")),
             min_24h_volume_usd=Decimal(os.getenv("MIN_24H_VOLUME_USD", "500000")),
             volume_spike_rsi_bonus=float(os.getenv("VOLUME_SPIKE_RSI_BONUS", "5")),
             volume_spike_threshold=float(os.getenv("VOLUME_SPIKE_THRESHOLD", "2.0")),
