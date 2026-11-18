@@ -81,6 +81,14 @@
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
               --set PYTHONPATH $out/bin
 
+            # On-chain vs Coinbase swap cost probe (quote-only) and its report
+            # Kept as .py files: the report imports the probe module.
+            for prog in onchain_cost_probe onchain_cost_report; do
+              makeWrapper ${pythonEnv}/bin/python3 $out/bin/''${prog//_/-} \
+                --add-flags $out/bin/$prog.py \
+                --set PYTHONPATH $out/bin
+            done
+
             # Transaction debugger
             mv $out/bin/debug_tx.py $out/bin/debug-tx
             chmod +x $out/bin/debug-tx

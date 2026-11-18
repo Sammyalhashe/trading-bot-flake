@@ -173,6 +173,20 @@ in
       coinbaseApiJson = apiJsonOption "COINBASE_API_JSON for the PnL report.";
     };
 
+    costProbe = {
+      enable = mkEnableOption "the hourly quote-only Base DEX vs Coinbase swap cost probe";
+      onCalendar = mkOption {
+        type = types.str;
+        default = "hourly";
+        description = "When the cost probe runs.";
+      };
+      sizesUsd = mkOption {
+        type = types.str;
+        default = "1000,10000";
+        description = "PROBE_SIZES_USD: comma-separated round-trip sizes to quote.";
+      };
+    };
+
     derivativesCollector = {
       enable = mkEnableOption "the daily OKX derivatives data collector";
       onCalendar = mkOption {
@@ -193,6 +207,9 @@ in
     home.packages =
       lib.optional cfg.ws.enable (
         pkgs.writeShellScriptBin "trading-botctl" ''exec ${bin "trading-botctl"} "$@"''
+      )
+      ++ lib.optional cfg.costProbe.enable (
+        pkgs.writeShellScriptBin "onchain-cost-report" ''exec ${bin "onchain-cost-report"} "$@"''
       )
       ++ lib.optional cfg.paper.enable (
         pkgs.writeShellScriptBin "trading-botctl-paper" ''
@@ -295,6 +312,18 @@ in
         };
       };
 
+      trading-bot-cost-probe = mkIf cfg.costProbe.enable {
+        Unit = networkOnline // {
+          Description = "Quote Base DEX and Coinbase round-trip swap costs (no orders)";
+        };
+        Service = {
+          Type = "oneshot";
+          Environment = [ "PROBE_SIZES_USD=${cfg.costProbe.sizesUsd}" ];
+          EnvironmentFile = cfg.environmentFiles;
+          ExecStart = bin "onchain-cost-probe";
+        };
+      };
+
       derivatives-collector = mkIf cfg.derivativesCollector.enable {
         Unit = networkOnline // {
           Description = "Collect OKX derivatives data for backtesting";
@@ -329,6 +358,10 @@ in
 
       coinbase-pnl-report = mkIf cfg.pnlReport.enable (
         dailyTimer "Run Coinbase Trading Bot PnL Report" cfg.pnlReport.onCalendar
+      );
+
+      trading-bot-cost-probe = mkIf cfg.costProbe.enable (
+        dailyTimer "Hourly Base DEX vs Coinbase swap cost probe" cfg.costProbe.onCalendar
       );
 
       derivatives-collector = mkIf cfg.derivativesCollector.enable (
