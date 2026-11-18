@@ -8,9 +8,13 @@
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    backtesting-data = {
+      url = "github:Sammyalhashe/backtesting-data-flake";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, sops-nix }:
+  outputs = { self, nixpkgs, flake-utils, sops-nix, backtesting-data }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -144,6 +148,7 @@
         };
 
         devShells.default = pkgs.mkShell {
+          BACKTEST_DATA_DIR = "${backtesting-data.packages.${system}.default}/1h";
           buildInputs = [
             pythonEnv
             pkgs.python3Packages.pip

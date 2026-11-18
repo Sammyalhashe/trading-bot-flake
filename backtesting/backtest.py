@@ -4,6 +4,7 @@ Backtest trading strategies against historical data.
 
 Tests mean_reversion, trend_following, and auto (dynamic) strategies.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -490,7 +491,7 @@ def print_results(results: Dict):
 
 def main():
     parser = argparse.ArgumentParser(description='Backtest trading strategies')
-    parser.add_argument('--data-dir', type=str, default='../data/historical',
+    parser.add_argument('--data-dir', type=str, default=os.environ.get('BACKTEST_DATA_DIR', '../data/historical'),
                        help='Directory containing CSV data files')
     parser.add_argument('--symbols', nargs='+', default=['BTC-USD', 'ETH-USD'],
                        help='Symbols to backtest (default: BTC-USD ETH-USD)')

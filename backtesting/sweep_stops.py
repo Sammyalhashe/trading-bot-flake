@@ -4,6 +4,7 @@
 Selection and validation windows are reported separately so parameters are
 chosen on the earlier window only.
 """
+import os
 import sys
 from pathlib import Path
 from itertools import product
@@ -70,7 +71,7 @@ def run(files, mult, floor, cooldown, window):
 
 def main():
     logging.disable(logging.CRITICAL)
-    files = sorted(str(p) for p in (Path(__file__).parent.parent / "data/historical").glob("*_USD_1h_*.csv"))
+    files = sorted(str(p) for p in Path(os.environ.get("BACKTEST_DATA_DIR", Path(__file__).parent.parent / "data/historical")).glob("*_USD_1h_*.csv"))
     out = []
     for name, window in WINDOWS.items():
         for mult, floor, cooldown in product(MULTIPLIERS, FLOORS, COOLDOWNS):

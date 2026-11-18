@@ -29,6 +29,10 @@ jobs:
       # instead of whatever pip resolves today.
       - uses: cachix/install-nix-action@v27
 
+      - uses: cachix/cachix-action@v15
+        with:
+          name: starllama
+
       - name: Run tests
         run: nix develop --impure -c python3 -X faulthandler -m pytest tests/ -v --tb=short -p no:cacheprovider -o faulthandler_timeout=120
 
