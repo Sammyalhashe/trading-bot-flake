@@ -728,3 +728,24 @@ class TestBearPositionScale:
         buys = self._run_bear_scan(mock_executor, mock_data_provider, held_btc=4.0)
         assert len(buys) == 1
         assert buys[0] <= 120.0 + 0.01
+
+
+class TestControlPause:
+    @pytest.fixture
+    def paused_control(self, tmp_path):
+        import trading_bot
+        from core.control import ControlCenter
+        center = ControlCenter(tmp_path / "control.json", trading_bot.config)
+        center.handle("pause test")
+        with patch.object(trading_bot, "control", center):
+            yield center
+
+    def test_paused_bot_skips_buys(self, temp_state_file, mock_executor, mock_data_provider, paused_control):
+        import trading_bot
+        _arrange_buyable_btc(mock_data_provider)
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+        assert not _buy_calls(mock_executor)
+
+    def test_paused_bot_still_stops_out(self, temp_state_file, mock_executor, mock_data_provider, paused_control):
+        _hold_btc_at_price(mock_executor, mock_data_provider, entry=200.0, price=150.0)
+        assert _sell_calls(mock_executor)

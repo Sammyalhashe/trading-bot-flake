@@ -74,6 +74,13 @@
               --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
               --set PYTHONPATH $out/bin
 
+            # Runtime control client for the WS bot
+            mv $out/bin/trading_botctl.py $out/bin/trading-botctl
+            chmod +x $out/bin/trading-botctl
+            wrapProgram $out/bin/trading-botctl \
+              --set PATH ${pkgs.lib.makeBinPath [ pythonEnv ]} \
+              --set PYTHONPATH $out/bin
+
             # Transaction debugger
             mv $out/bin/debug_tx.py $out/bin/debug-tx
             chmod +x $out/bin/debug-tx

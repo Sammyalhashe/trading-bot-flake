@@ -18,8 +18,9 @@ from decimal import Decimal
 from config import TradingConfig, ExecutorConfig
 
 # Import core business logic
-from core.telegram import exit_reason_label, exchange_label, format_price, format_usd
+from core.telegram import exit_reason_label, exchange_label, format_price, format_usd, _get_token as telegram_token
 from core import StateManager, TechnicalAnalysis, RegimeDetector, RiskManager, send_telegram_message, TradeLog, DerivativesDataProvider
+from core.control import ControlCenter, TelegramPoller, serve_unix
 
 # Graceful shutdown
 shutdown_requested = False
@@ -40,6 +41,8 @@ exec_config.validate()
 # Initialize core components
 state_manager = StateManager(exec_config.state_file)
 trade_log = TradeLog(exec_config.state_file.with_suffix('.trades.db'))
+control = ControlCenter(exec_config.state_file.with_suffix('.control.json'), config)
+_last_scan = {}
 technical_analysis = TechnicalAnalysis(
     ma_short_window=config.ma_short_window,
     ma_long_window=config.ma_long_window
@@ -450,6 +453,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     # Update peak value and check drawdown (per-executor)
     trading_allowed, dd_reason = risk_manager.check_circuit_breakers(ex_value, ex_id)
     drawdown_pct = risk_manager.get_current_drawdown(ex_value, ex_id)
+    if control.is_paused():
+        trading_allowed = False
+        logging.info(f"[{ex_id}] Trading paused via control channel — skipping new entries")
 
     if reset_to_usdc:
         for asset, amount in held_avail.items():
@@ -1031,6 +1037,8 @@ def _run_bot(reset_to_usdc=False):
             logging.error(f"Strategy failed for {ex.__class__.__name__}: {e}")
 
     logging.info(f"--- Aggregate Portfolio Total: ${aggregate_value:,.2f} ---")
+    _last_scan.update(full_regime=full_regime, aggregate_value=aggregate_value,
+                      time=datetime.datetime.now().isoformat(timespec="seconds"))
 
     # Run summary
     increment_run_count()
@@ -1182,10 +1190,13 @@ def run_ws_mode():
                         _held_entries.pop(entry_key, None)
                         _balances.pop(asset, None)
 
+        _scan_lock = threading.Lock()  # a flatten must never interleave with a scan
+
         def on_scan_cycle():
             logging.info("[WS] Running periodic full scan...")
-            _run_bot()
-            _refresh_snapshots()
+            with _scan_lock:
+                _run_bot()
+                _refresh_snapshots()
             # Update WS subscriptions to match current holdings
             held_products = [k.split(":", 1)[1] for k in _held_entries]
             if held_products:
@@ -1219,8 +1230,44 @@ def run_ws_mode():
             shutdown_event=shutdown_event,
         )
 
+        def _control_status():
+            if not _last_scan:
+                return "No scan has completed yet."
+            msg = _build_status_message(_last_scan["full_regime"], cb_executor,
+                                        _last_scan["aggregate_value"], load_state())
+            return f"{msg}\n\nLast scan: {_last_scan['time']}"
+
+        def _control_flatten():
+            with _scan_lock:
+                _run_bot(reset_to_usdc=True)
+                _refresh_snapshots()
+            return ""
+
+        control.status_fn = _control_status
+        control.flatten_fn = _control_flatten
+        socket_path = Path(os.environ.get("TRADING_BOT_SOCKET") or
+                           os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "trading-bot.sock"))
+        poller_stop = threading.Event()
+
+        async def _main():
+            server = await serve_unix(socket_path, control)
+            if os.environ.get("CONTROL_TELEGRAM", "false").lower() == "true":
+                token = telegram_token()
+                if token:
+                    poller = TelegramPoller(control, token, os.environ.get("TELEGRAM_CHAT_ID", "8555669756"))
+                    threading.Thread(target=poller.run, args=(poller_stop,), daemon=True,
+                                     name="telegram-control").start()
+                    logging.info("[Control] Telegram commands enabled")
+            try:
+                await client.run()
+            finally:
+                poller_stop.set()
+                server.close()
+                await server.wait_closed()
+                socket_path.unlink(missing_ok=True)
+
         logging.info(f"Starting WebSocket mode (scan every {config.ws_scan_interval}s)")
-        asyncio.run(client.run())
+        asyncio.run(_main())
     finally:
         release_run_lock()
 

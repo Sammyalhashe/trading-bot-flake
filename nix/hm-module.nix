@@ -164,6 +164,10 @@ in
   };
 
   config = mkIf cfg.enable {
+    home.packages = mkIf cfg.ws.enable [
+      (pkgs.writeShellScriptBin "trading-botctl" ''exec ${bin "trading-botctl"} "$@"'')
+    ];
+
     systemd.user.services = {
       coinbase-trader-ws = mkIf cfg.ws.enable {
         Unit = networkOnline // {
