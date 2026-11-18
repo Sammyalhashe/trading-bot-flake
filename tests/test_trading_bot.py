@@ -438,8 +438,9 @@ class TestPerExecutorFee:
             trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
 
         pnl = record.call_args.args[1]
-        assert pnl == pytest.approx((150.0 - 200.0) - 200.0 * 0.006)
-        assert pnl != pytest.approx((150.0 - 200.0) - 200.0 * float(trading_bot.config.round_trip_fee_pct))
+        # No recorded buy fee or fill fee here, so both legs are estimated at the executor's rate.
+        assert pnl == pytest.approx((150.0 - 200.0) - 200.0 * 0.003 - 150.0 * 0.003)
+        assert pnl != pytest.approx((150.0 - 200.0) - 350.0 * float(trading_bot.config.round_trip_fee_pct) / 2)
 
     def test_onchain_fee_floor_defers_trend_exit(self, temp_state_file, mock_executor, mock_data_provider):
         import trading_bot
@@ -749,3 +750,116 @@ class TestControlPause:
     def test_paused_bot_still_stops_out(self, temp_state_file, mock_executor, mock_data_provider, paused_control):
         _hold_btc_at_price(mock_executor, mock_data_provider, entry=200.0, price=150.0)
         assert _sell_calls(mock_executor)
+
+
+class TestActualFees:
+    KEY = "TestExecutor:BTC-USDC"
+
+    def test_buy_records_actual_fill_fee(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        _arrange_buyable_btc(mock_data_provider)
+        price = float(mock_data_provider.get_product_details.return_value["price"])
+        mock_executor.place_limit_order.return_value = {"success": True, "success_response": {"order_id": "buy-1"}}
+        mock_executor.check_order_filled.return_value = {"price": price, "fee": 1.23}
+        with patch.object(trading_bot, "trade_log") as log:
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+        assert log.record_buy.call_args.kwargs["fee"] == pytest.approx(1.23)
+        assert trading_bot.load_state()["entry_fees"][self.KEY] == pytest.approx(1.23)
+
+    def test_stop_sell_uses_stored_buy_fee_and_actual_sell_fee(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        mock_executor.place_aggressive_limit_order.return_value = {"success": True, "success_response": {"order_id": "sell-1"}}
+        mock_executor.check_order_filled.return_value = {"price": 150.0, "fee": 0.5}
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 200.0)
+        trading_bot.add_entry_fee("TestExecutor", "BTC-USDC", 2.0)
+        with patch.object(trading_bot, "trade_log") as log, patch.object(trading_bot, "record_trade") as record:
+            _hold_btc_at_price(mock_executor, mock_data_provider, entry=200.0, price=150.0)
+        assert record.call_args.args[1] == pytest.approx((150.0 - 200.0) - 2.0 - 0.5)
+        assert log.record_sell.call_args.kwargs["fee"] == pytest.approx(0.5)
+        assert self.KEY not in trading_bot.load_state().get("entry_fees", {})
+
+    def test_partial_exits_split_the_buy_fee(self, temp_state_file):
+        import trading_bot
+        trading_bot.add_entry_fee("TestExecutor", "BTC-USDC", 2.0)
+        trading_bot.add_entry_fee("TestExecutor", "BTC-USDC", 1.0)
+        assert trading_bot.take_entry_fee("TestExecutor", "BTC-USDC", 0.5) == pytest.approx(1.5)
+        assert trading_bot.take_entry_fee("TestExecutor", "BTC-USDC", 1.0) == pytest.approx(1.5)
+        assert trading_bot.take_entry_fee("TestExecutor", "BTC-USDC", 1.0) is None
+
+    def test_legacy_position_estimates_both_legs(self, temp_state_file):
+        import trading_bot
+        executor = MagicMock(round_trip_fee_pct=Decimal("0.006"))
+        with patch.object(trading_bot, "trade_log") as log, patch.object(trading_bot, "record_trade"):
+            pnl = trading_bot._record_exit(executor, "TestExecutor", "BTC", "BTC-USDC", sell_amount=1.0,
+                                           sell_ratio=1.0, exit_price=150.0, actual_sell_fee=None, entry=200.0,
+                                           reason="Trailing stop", full_regime="BEAR", hwm=210.0)
+        assert pnl == pytest.approx(-50.0 - 200.0 * 0.003 - 150.0 * 0.003)
+        assert log.record_sell.call_args.kwargs["fee"] == pytest.approx(150.0 * 0.003)
+
+    @pytest.mark.parametrize("raw, expected", [("BTC-USD", "BTC-USDC"), ("BTC-USDC", "BTC-USDC"), ("ETH-BTC", "ETH-BTC")])
+    def test_ws_ticker_ids_map_back_to_usdc_products(self, raw, expected):
+        import trading_bot
+        assert trading_bot.usdc_product_id(raw) == expected
+
+
+class TestWebSocketTickExit:
+    def _capture_on_tick(self, executor):
+        import trading_bot
+        captured = {}
+
+        def fake_client(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch.object(trading_bot, "CoinbaseExecutor", return_value=executor), \
+             patch.object(trading_bot, "acquire_run_lock", return_value=True), \
+             patch.object(trading_bot, "release_run_lock"), \
+             patch.object(trading_bot.signal, "signal"), \
+             patch("core.CoinbaseWSClient", side_effect=fake_client), \
+             patch("asyncio.run", side_effect=lambda coro: coro.close()):
+            trading_bot.run_ws_mode()
+        return captured["on_tick"]
+
+    def _executor(self):
+        executor = MagicMock()
+        executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        executor.get_market_data.return_value = make_candle_df(200.0)
+        executor.get_supported_assets.return_value = ["BTC"]
+        executor.place_aggressive_limit_order.return_value = {"success": True, "success_response": {"order_id": "s1"}}
+        executor.check_order_filled.return_value = {"price": 150.0, "fee": 0.4}
+        return executor
+
+    def test_usd_ticker_triggers_stop_on_usdc_position(self, temp_state_file):
+        import trading_bot
+        trading_bot.update_entry_price("CoinbaseExecutor", "BTC-USDC", 200.0)
+        executor = self._executor()
+        on_tick = self._capture_on_tick(executor)
+        with patch.object(trading_bot, "trade_log") as log, patch.object(trading_bot, "record_trade"):
+            on_tick("BTC-USD", 150.0)
+        assert executor.place_aggressive_limit_order.call_args.args[:2] == ("BTC-USDC", "SELL")
+        assert log.record_sell.call_args.kwargs["fee"] == pytest.approx(0.4)
+        assert "CoinbaseExecutor:BTC-USDC" not in trading_bot.load_state()["entry_prices"]
+        assert "CoinbaseExecutor:BTC-USDC" in trading_bot.load_state()["stopout_timestamps"]
+
+    def test_new_high_tick_updates_only_the_hwm(self, temp_state_file):
+        import trading_bot
+        trading_bot.update_entry_price("CoinbaseExecutor", "BTC-USDC", 200.0)
+        on_tick = self._capture_on_tick(self._executor())
+        state = trading_bot.load_state()
+        state["entry_prices"]["CoinbaseExecutor:ETH-USDC"] = 3000.0  # written by a scan after the WS snapshot
+        trading_bot.save_state(state)
+        on_tick("BTC-USD", 205.0)
+        state = trading_bot.load_state()
+        assert state["high_water_marks"]["CoinbaseExecutor:BTC-USDC"] == pytest.approx(205.0)
+        assert state["entry_prices"]["CoinbaseExecutor:ETH-USDC"] == 3000.0
+
+    def test_failed_tick_exit_is_throttled(self, temp_state_file):
+        import trading_bot
+        trading_bot.update_entry_price("CoinbaseExecutor", "BTC-USDC", 200.0)
+        executor = self._executor()
+        executor.place_aggressive_limit_order.return_value = None
+        executor.place_market_order.return_value = None
+        on_tick = self._capture_on_tick(executor)
+        on_tick("BTC-USD", 150.0)
+        on_tick("BTC-USD", 149.0)
+        assert executor.place_aggressive_limit_order.call_count == 1

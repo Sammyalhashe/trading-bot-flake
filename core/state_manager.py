@@ -124,7 +124,41 @@ class StateManager:
         # Also clear entry timestamp
         if key in state.get("entry_timestamps", {}):
             del state["entry_timestamps"][key]
+        state.get("entry_fees", {}).pop(key, None)
         self.save_state(state)
+
+    def add_entry_fee(self, executor_id: str, product_id: str, fee: float) -> None:
+        """Accumulate the buy-side fees paid into an open position."""
+        state = self.load_state()
+        fees = state.setdefault("entry_fees", {})
+        key = f"{executor_id}:{product_id}"
+        fees[key] = fees.get(key, 0.0) + float(fee)
+        self.save_state(state)
+
+    def take_entry_fee(self, executor_id: str, product_id: str, fraction: float) -> float | None:
+        """Release the share of buy fees belonging to the sold fraction; None if none were recorded."""
+        state = self.load_state()
+        fees = state.get("entry_fees", {})
+        key = f"{executor_id}:{product_id}"
+        if key not in fees:
+            return None
+        share = fees[key] * min(max(fraction, 0.0), 1.0)
+        remaining = fees[key] - share
+        if remaining > 1e-9:
+            fees[key] = remaining
+        else:
+            del fees[key]
+        self.save_state(state)
+        return share
+
+    def update_high_water_mark(self, executor_id: str, product_id: str, hwm: float) -> None:
+        """Raise one position's HWM without rewriting the rest of the state."""
+        state = self.load_state()
+        marks = state.setdefault("high_water_marks", {})
+        key = f"{executor_id}:{product_id}"
+        if hwm > marks.get(key, 0.0):
+            marks[key] = hwm
+            self.save_state(state)
 
     def record_stopout(self, executor_id: str, product_id: str) -> None:
         """Remember when a stop-loss exit happened so re-entry can be delayed"""

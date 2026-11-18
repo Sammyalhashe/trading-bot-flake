@@ -63,17 +63,18 @@ class TradeLog:
                    product_id: str, price: float, quantity: float,
                    usd_value: float, market_regime: str,
                    rsi: Optional[float] = None,
-                   momentum: Optional[float] = None):
+                   momentum: Optional[float] = None,
+                   fee: Optional[float] = None):
         """Insert a BUY trade record."""
         try:
             conn = self._connect()
             conn.execute(
                 """INSERT INTO trades
                    (timestamp, executor_id, asset, product_id, side, price,
-                    quantity, usd_value, market_regime, rsi, momentum)
-                   VALUES (?, ?, ?, ?, 'BUY', ?, ?, ?, ?, ?, ?)""",
+                    quantity, usd_value, market_regime, rsi, momentum, fee)
+                   VALUES (?, ?, ?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?)""",
                 (timestamp, executor_id, asset, product_id, price,
-                 quantity, usd_value, market_regime, rsi, momentum))
+                 quantity, usd_value, market_regime, rsi, momentum, fee))
             conn.commit()
             conn.close()
         except Exception as e:

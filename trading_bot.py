@@ -201,6 +201,26 @@ def clear_entry_price(executor_id, product_id):
         state_manager.lock_file = STATE_FILE.with_suffix('.lock')
     return state_manager.clear_entry_price(executor_id, product_id)
 
+def _state():
+    """state_manager pointed at the current STATE_FILE (tests patch it)."""
+    if state_manager.state_file != STATE_FILE:
+        state_manager.state_file = STATE_FILE
+        state_manager.lock_file = STATE_FILE.with_suffix('.lock')
+    return state_manager
+
+def add_entry_fee(executor_id, product_id, fee):
+    return _state().add_entry_fee(executor_id, product_id, fee)
+
+def take_entry_fee(executor_id, product_id, fraction):
+    return _state().take_entry_fee(executor_id, product_id, fraction)
+
+def update_high_water_mark(executor_id, product_id, hwm):
+    return _state().update_high_water_mark(executor_id, product_id, hwm)
+
+def usdc_product_id(product_id):
+    """Coinbase merged USD/USDC books; the WS ticker reports BTC-USD for a BTC-USDC subscription."""
+    return product_id + "C" if product_id.endswith("-USD") else product_id
+
 def record_stopout(executor_id, product_id):
     # Update state_manager's state_file in case STATE_FILE was patched (for tests)
     if state_manager.state_file != STATE_FILE:
@@ -370,6 +390,72 @@ def _executor_round_trip_fee(executor):
     if isinstance(fee, bool) or not isinstance(fee, (int, float, Decimal)):
         return None
     return fee if Decimal(str(fee)).is_finite() and fee >= 0 else None
+
+
+def _place_exit_order(executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss):
+    """Place an exit and confirm the fill. Returns (status, exit_price, sell_fee); status is filled, dust or failed."""
+    if is_stop_loss and hasattr(executor, 'place_aggressive_limit_order'):
+        # Stop-losses use aggressive limit (no post_only) for immediate fill with price protection
+        result = executor.place_aggressive_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+    else:
+        result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
+    if not result and is_stop_loss:
+        logging.warning(f"[{ex_id}] Aggressive limit sell failed for stop loss on {asset}, falling back to market order")
+        result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
+    if not result:
+        return "failed", price, None
+    if isinstance(result, dict) and result.get("tx_hash") == "dust_skip":
+        logging.warning(f"[{ex_id}] {asset} sell was dust-skipped (amount too small). Clearing entry price.")
+        return "dust", price, None
+    if isinstance(result, dict) and result.get("success") is False:
+        if result.get("pending"):
+            # The original sell may still land; a fallback sell could sell the position twice.
+            logging.error(f"[{ex_id}] Sell {asset} unconfirmed (tx {result.get('tx_hash')}); not retrying")
+            return "failed", price, None
+        if not is_stop_loss:
+            logging.warning(f"[{ex_id}] Sell {asset} failed: {result.get('error', 'unknown')}")
+            return "failed", price, None
+        logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Last-resort market order.")
+        result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
+        if not result or (isinstance(result, dict) and result.get("success") is False):
+            logging.error(f"[{ex_id}] Market order fallback also failed for {asset}")
+            return "failed", price, None
+
+    exit_price, sell_fee = price, None
+    if isinstance(result, dict) and result.get("confirmed"):
+        logging.info(f"[{ex_id}] Sell {asset} confirmed on-chain at ${price:,.2f}")
+    elif isinstance(result, dict):
+        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+        if order_id and hasattr(executor, 'check_order_filled'):
+            fill_info = executor.check_order_filled(order_id)
+            if fill_info:
+                exit_price, sell_fee = fill_info["price"], fill_info["fee"]
+                logging.info(f"[{ex_id}] Sell {asset} confirmed at ${exit_price:,.2f}")
+            else:
+                logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
+    return "filled", exit_price, sell_fee
+
+
+def _record_exit(executor, ex_id, asset, product_id, sell_amount, sell_ratio, exit_price, actual_sell_fee,
+                 entry, reason, full_regime, hwm):
+    """Book a filled exit: PnL net of the position's recorded buy fees and the actual sell fee."""
+    rate = _executor_round_trip_fee(executor)
+    buy_fee = take_entry_fee(ex_id, product_id, sell_ratio)
+    if buy_fee is None:  # positions opened before buy fees were recorded
+        buy_fee = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=False, round_trip_fee_pct=rate)
+    sell_fee = actual_sell_fee if actual_sell_fee is not None else risk_manager.calculate_fees(
+        exit_price * sell_amount, is_round_trip=False, round_trip_fee_pct=rate)
+    pnl = (exit_price - entry) * sell_amount - buy_fee - sell_fee
+    record_trade(pnl > 0, pnl)
+    logging.info(f"[{ex_id}] 📊 PnL: ${pnl:+.2f} (entry=${entry:,.2f} -> exit=${exit_price:,.2f}, fees=${buy_fee + sell_fee:.2f})")
+    _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl)
+    trade_log.record_sell(
+        timestamp=datetime.datetime.now().isoformat(),
+        executor_id=ex_id, asset=asset, product_id=product_id,
+        price=exit_price, quantity=sell_amount,
+        entry_price=entry, pnl=pnl, fee=sell_fee,
+        reason=reason, market_regime=full_regime, hwm=hwm)
+    return pnl
 
 
 def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False, derivatives_signals=None):
@@ -576,6 +662,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                         # Check if on-chain swap was confirmed via receipt
                         if result.get("confirmed"):
                             update_entry_price(ex_id, product_id, price, existing_qty, new_qty)
+                            buy_fee = risk_manager.calculate_fees(buy_size, is_round_trip=False,
+                                                                  round_trip_fee_pct=_executor_round_trip_fee(executor))
+                            add_entry_fee(ex_id, product_id, buy_fee)
                             available_usdc -= buy_size
                             if not already_holds:
                                 current_positions += 1
@@ -586,7 +675,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                 executor_id=ex_id, asset=asset, product_id=product_id,
                                 price=price, quantity=new_qty, usd_value=buy_size,
                                 market_regime=full_regime,
-                                rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
+                                rsi=candidate.get("rsi"), momentum=candidate.get("momentum"), fee=buy_fee)
                         elif result.get("success") is False:
                             logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
                         else:
@@ -598,6 +687,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                     filled_price = fill_info["price"]
                                     new_qty_filled = buy_size / filled_price
                                     update_entry_price(ex_id, product_id, filled_price, existing_qty, new_qty_filled)
+                                    if fill_info.get("fee") is not None:
+                                        add_entry_fee(ex_id, product_id, fill_info["fee"])
                                     available_usdc -= buy_size
                                     if not already_holds:
                                         current_positions += 1
@@ -608,13 +699,17 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                         executor_id=ex_id, asset=asset, product_id=product_id,
                                         price=filled_price, quantity=new_qty_filled, usd_value=buy_size,
                                         market_regime=full_regime,
-                                        rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
+                                        rsi=candidate.get("rsi"), momentum=candidate.get("momentum"),
+                                        fee=fill_info.get("fee"))
                                 else:
                                     logging.warning(f"[{ex_id}] Buy {asset} order {order_id} not confirmed filled, cancelling stale order")
                                     executor.cancel_open_orders(product_id)
                             else:
                                 # Paper mode — use requested price
                                 update_entry_price(ex_id, product_id, price, existing_qty, new_qty)
+                                buy_fee = risk_manager.calculate_fees(buy_size, is_round_trip=False,
+                                                                      round_trip_fee_pct=_executor_round_trip_fee(executor))
+                                add_entry_fee(ex_id, product_id, buy_fee)
                                 available_usdc -= buy_size
                                 if not already_holds:
                                     current_positions += 1
@@ -624,7 +719,7 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                                     executor_id=ex_id, asset=asset, product_id=product_id,
                                     price=price, quantity=new_qty, usd_value=buy_size,
                                     market_regime=full_regime,
-                                    rsi=candidate.get("rsi"), momentum=candidate.get("momentum"))
+                                    rsi=candidate.get("rsi"), momentum=candidate.get("momentum"), fee=buy_fee)
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
@@ -685,85 +780,22 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 logging.info(f"[{ex_id}] 🚨 {reason}")
                 sell_amount = amt * sell_ratio
                 is_stop_loss = "stop" in reason.lower()
-                if is_stop_loss and hasattr(executor, 'place_aggressive_limit_order'):
-                    # Stop-losses use aggressive limit (no post_only) for immediate fill with price protection
-                    result = executor.place_aggressive_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
-                else:
-                    result = executor.place_limit_order(product_id, 'SELL', price, amount_base_currency=sell_amount)
-                # Fallback to market order for stop losses if limit fails
-                if not result and is_stop_loss:
-                    logging.warning(f"[{ex_id}] Aggressive limit sell failed for stop loss on {asset}, falling back to market order")
-                    result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
-                if result:
-                    # Handle dust_skip — position is effectively gone, clean up state
-                    if isinstance(result, dict) and result.get("tx_hash") == "dust_skip":
-                        logging.warning(f"[{ex_id}] {asset} sell was dust-skipped (amount too small). Clearing entry price.")
-                        clear_entry_price(ex_id, product_id)
-                        state = load_state()
-                        continue
-                    # Confirm fill and get actual exit price + fee
-                    exit_price = price  # default to requested price
-                    actual_sell_fee = None  # set by check_order_filled if available
-                    if isinstance(result, dict) and result.get("success") is False:
-                        if result.get("pending"):
-                            # The original sell may still land; a fallback sell could sell the position twice.
-                            logging.error(f"[{ex_id}] Sell {asset} unconfirmed (tx {result.get('tx_hash')}); not retrying")
-                            continue
-                        # Last resort: market order fallback for stop losses
-                        if is_stop_loss:
-                            logging.warning(f"[{ex_id}] Limit sell rejected for stop loss on {asset}: {result.get('error', 'unknown')}. Last-resort market order.")
-                            result = executor.place_market_order(product_id, 'SELL', amount_base_currency=sell_amount)
-                            if not result or (isinstance(result, dict) and result.get("success") is False):
-                                logging.error(f"[{ex_id}] Market order fallback also failed for {asset}")
-                                continue
-                        else:
-                            logging.warning(f"[{ex_id}] Sell {asset} failed: {result.get('error', 'unknown')}")
-                            continue
-                    if isinstance(result, dict) and result.get("confirmed"):
-                        logging.info(f"[{ex_id}] Sell {asset} confirmed on-chain at ${price:,.2f}")
-                    elif isinstance(result, dict):
-                        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
-                        if order_id and hasattr(executor, 'check_order_filled'):
-                            fill_info = executor.check_order_filled(order_id)
-                            if fill_info:
-                                exit_price = fill_info["price"]
-                                actual_sell_fee = fill_info["fee"]
-                                logging.info(f"[{ex_id}] Sell {asset} confirmed at ${exit_price:,.2f}")
-                            else:
-                                logging.warning(f"[{ex_id}] Sell {asset} order {order_id} not confirmed filled, using requested price for PnL")
-
-                    logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
-                    # Track PnL (fee-aware)
-                    # Uses actual fees from Coinbase API when available,
-                    # falls back to estimated round-trip fee for on-chain/paper trades.
-                    if entry:
-                        if actual_sell_fee is not None:
-                            # Actual sell fee from API; estimate buy-side fee (not tracked at buy time)
-                            buy_fee_est = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=False,
-                                                                      round_trip_fee_pct=_executor_round_trip_fee(executor))
-                            fee_cost = buy_fee_est + actual_sell_fee
-                        else:
-                            fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True,
-                                                                   round_trip_fee_pct=_executor_round_trip_fee(executor))
-                        pnl = (exit_price - entry) * sell_amount - fee_cost
-                        is_win = pnl > 0
-                        record_trade(is_win, pnl)
-                        logging.info(f"[{ex_id}] 📊 PnL: ${pnl:+.2f} (entry=${entry:,.2f} -> exit=${exit_price:,.2f}, fees=${fee_cost:.2f})")
-                        _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl)
-                        trade_log.record_sell(
-                            timestamp=datetime.datetime.now().isoformat(),
-                            executor_id=ex_id, asset=asset, product_id=product_id,
-                            price=exit_price, quantity=sell_amount,
-                            entry_price=entry, pnl=pnl, fee=fee_cost,
-                            reason=reason, market_regime=full_regime, hwm=hwm)
-                    if is_stop_loss:
-                        record_stopout(ex_id, product_id)
-                    if sell_ratio == 1.0:
-                        clear_entry_price(ex_id, product_id)
-                        state = load_state()
-                    else:
-                        # Partial sell — save updated TP flags (already saved above)
-                        pass
+                status, exit_price, actual_sell_fee = _place_exit_order(
+                    executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss)
+                if status == "dust":
+                    clear_entry_price(ex_id, product_id)
+                    state = load_state()
+                    continue
+                if status != "filled":
+                    continue
+                logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
+                _record_exit(executor, ex_id, asset, product_id, sell_amount, sell_ratio, exit_price,
+                             actual_sell_fee, entry, reason, full_regime, hwm)
+                if is_stop_loss:
+                    record_stopout(ex_id, product_id)
+                if sell_ratio == 1.0:
+                    clear_entry_price(ex_id, product_id)
+                    state = load_state()
         except Exception as e:
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
 
@@ -1103,8 +1135,11 @@ def run_ws_mode():
                 _candle_cache.clear()
                 _candle_cache.update(new_candles)
 
+        _tick_retry_after = {}  # product_id -> epoch; throttles retries after a failed tick exit
+
         def on_tick(product_id, price):
             ex_id = "CoinbaseExecutor"
+            product_id = usdc_product_id(product_id)
             entry_key = f"{ex_id}:{product_id}"
 
             # Snapshot all shared state under the lock; do computation outside.
@@ -1127,68 +1162,67 @@ def run_ws_mode():
 
             if amt * price < float(config.min_order_usd):
                 return  # dust
+            if time.time() < _tick_retry_after.get(product_id, 0):
+                return
 
-            if price > hwm:
+            new_high = price > hwm
+            if new_high:
                 hwm = price
                 with _state_lock:
                     _state_cache.setdefault("high_water_marks", {})[entry_key] = hwm
-                    state_snap = dict(_state_cache)
-                save_state(state_snap)
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
                 asset, product_id, market_data, price, entry, hwm, tp_flags, _state_cache, entry_key
             )
-
-            if not sell_trigger:
+            if not (new_high or sell_trigger):
                 return
 
+            # Persist or sell only while no scan runs; a running scan re-checks exits itself.
+            if not _scan_lock.acquire(blocking=False):
+                return
+            try:
+                if new_high:
+                    update_high_water_mark(ex_id, product_id, hwm)
+                if sell_trigger:
+                    _tick_exit(ex_id, asset, product_id, entry_key, price, entry, hwm,
+                               sell_ratio, reason, tp_flags, amt)
+            finally:
+                _scan_lock.release()
+
+        def _tick_exit(ex_id, asset, product_id, entry_key, price, entry, hwm, sell_ratio, reason, tp_flags, cached_amt):
+            state = load_state()
+            state.setdefault("take_profit_flags", {})[entry_key] = tp_flags
+            save_state(state)
             with _state_lock:
                 _state_cache.setdefault("take_profit_flags", {})[entry_key] = tp_flags
-                state_snap = dict(_state_cache)
-            save_state(state_snap)
 
             logging.info(f"[WS] {reason}")
-            # Fetch fresh balance for the actual sell amount
-            fresh_bal = cb_executor.get_balances()
-            amt = fresh_bal.get("crypto", {}).get(asset, amt)
+            amt = cb_executor.get_balances().get("crypto", {}).get(asset, cached_amt)
             sell_amount = amt * sell_ratio
             is_stop_loss = "stop" in reason.lower()
-            result = cb_executor.place_limit_order(
-                product_id, 'SELL', price, amount_base_currency=sell_amount
-            )
-            if not result and is_stop_loss:
-                logging.warning(f"[WS] Limit sell failed for stop loss on {asset}, "
-                                "falling back to market order")
-                result = cb_executor.place_market_order(
-                    product_id, 'SELL', amount_base_currency=sell_amount
-                )
-            if result:
-                exit_price = price
-                if isinstance(result, dict) and result.get("success") is False:
-                    if is_stop_loss:
-                        result = cb_executor.place_market_order(
-                            product_id, 'SELL', amount_base_currency=sell_amount
-                        )
-                        if not result or (isinstance(result, dict) and result.get("success") is False):
-                            logging.error(f"[WS] Market order fallback also failed for {asset}")
-                            return
-                    else:
-                        return
-                logging.info(f"[WS] Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
-                if entry:
-                    fee_cost = risk_manager.calculate_fees(entry * sell_amount, is_round_trip=True)
-                    pnl = (exit_price - entry) * sell_amount - fee_cost
-                    record_trade(pnl > 0, pnl)
-                    logging.info(f"[WS] PnL: ${pnl:+.2f}")
-                if is_stop_loss:
-                    record_stopout("CoinbaseExecutor", product_id)
-                    with _state_lock:
-                        _state_cache.setdefault("stopout_timestamps", {})[entry_key] = time.time()
-                if sell_ratio == 1.0:
-                    clear_entry_price("CoinbaseExecutor", product_id)
-                    with _state_lock:
-                        _held_entries.pop(entry_key, None)
-                        _balances.pop(asset, None)
+            status, exit_price, sell_fee = _place_exit_order(
+                cb_executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss)
+            if status == "dust":
+                clear_entry_price(ex_id, product_id)
+                with _state_lock:
+                    _held_entries.pop(entry_key, None)
+                return
+            if status != "filled":
+                _tick_retry_after[product_id] = time.time() + 60
+                return
+
+            logging.info(f"[WS] Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
+            _record_exit(cb_executor, ex_id, asset, product_id, sell_amount, sell_ratio, exit_price,
+                         sell_fee, entry, reason, _last_scan.get("full_regime", "UNKNOWN"), hwm)
+            if is_stop_loss:
+                record_stopout(ex_id, product_id)
+                with _state_lock:
+                    _state_cache.setdefault("stopout_timestamps", {})[entry_key] = time.time()
+            if sell_ratio == 1.0:
+                clear_entry_price(ex_id, product_id)
+                with _state_lock:
+                    _held_entries.pop(entry_key, None)
+                    _balances.pop(asset, None)
 
         _scan_lock = threading.Lock()  # a flatten must never interleave with a scan
 
