@@ -437,6 +437,11 @@ class TestStrategyConfig:
         config.strategy = "auto"
         config.validate()  # Should not raise
 
+    def test_daily_trend_strategy_valid(self):
+        config = default_config()
+        config.strategy = "daily_trend"
+        config.validate()
+
     def test_max_concurrent_positions_default(self):
         config = default_config()
         assert config.max_concurrent_positions == 5
