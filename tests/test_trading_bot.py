@@ -820,19 +820,24 @@ class TestWebSocketTickExit:
             trading_bot.run_ws_mode()
         return captured["on_tick"]
 
-    def _executor(self):
+    REAL_SHAPE = {"available": {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}},
+                  "total": {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}}
+    LEGACY_SHAPE = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+
+    def _executor(self, balances=REAL_SHAPE):
         executor = MagicMock()
-        executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        executor.get_balances.return_value = balances
         executor.get_market_data.return_value = make_candle_df(200.0)
         executor.get_supported_assets.return_value = ["BTC"]
         executor.place_aggressive_limit_order.return_value = {"success": True, "success_response": {"order_id": "s1"}}
         executor.check_order_filled.return_value = {"price": 150.0, "fee": 0.4}
         return executor
 
-    def test_usd_ticker_triggers_stop_on_usdc_position(self, temp_state_file):
+    @pytest.mark.parametrize("shape", ["real", "legacy"])
+    def test_usd_ticker_triggers_stop_on_usdc_position(self, temp_state_file, shape):
         import trading_bot
         trading_bot.update_entry_price("CoinbaseExecutor", "BTC-USDC", 200.0)
-        executor = self._executor()
+        executor = self._executor(self.REAL_SHAPE if shape == "real" else self.LEGACY_SHAPE)
         on_tick = self._capture_on_tick(executor)
         with patch.object(trading_bot, "trade_log") as log, patch.object(trading_bot, "record_trade"):
             on_tick("BTC-USD", 150.0)

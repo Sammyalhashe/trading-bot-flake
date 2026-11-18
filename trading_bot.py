@@ -217,6 +217,12 @@ def take_entry_fee(executor_id, product_id, fraction):
 def update_high_water_mark(executor_id, product_id, hwm):
     return _state().update_high_water_mark(executor_id, product_id, hwm)
 
+def available_crypto(balances):
+    """Tradeable crypto amounts from either balance shape executors return."""
+    if "available" in balances:
+        return balances["available"].get("crypto", {})
+    return balances.get("crypto", {})
+
 def usdc_product_id(product_id):
     """Coinbase merged USD/USDC books; the WS ticker reports BTC-USD for a BTC-USDC subscription."""
     return product_id + "C" if product_id.endswith("-USD") else product_id
@@ -1129,7 +1135,7 @@ def run_ws_mode():
                 _state_cache.clear()
                 _state_cache.update(state)
                 _balances.clear()
-                _balances.update(bal.get("crypto", {}))
+                _balances.update(available_crypto(bal))
                 _held_entries.clear()
                 _held_entries.update(new_entries)
                 _candle_cache.clear()
@@ -1197,7 +1203,7 @@ def run_ws_mode():
                 _state_cache.setdefault("take_profit_flags", {})[entry_key] = tp_flags
 
             logging.info(f"[WS] {reason}")
-            amt = cb_executor.get_balances().get("crypto", {}).get(asset, cached_amt)
+            amt = available_crypto(cb_executor.get_balances()).get(asset, cached_amt)
             sell_amount = amt * sell_ratio
             is_stop_loss = "stop" in reason.lower()
             status, exit_price, sell_fee = _place_exit_order(
