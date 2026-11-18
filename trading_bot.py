@@ -543,7 +543,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             )
             # Scale down position in BEAR regime
             if market_regime == "BEAR" and config.bear_position_scale < 1.0:
-                buy_size *= config.bear_position_scale
+                bear_cap = config.bear_position_scale * ex_value / max(1, max_positions)
+                buy_size = min(buy_size * config.bear_position_scale,
+                               max(0.0, bear_cap - current_asset_value))
                 if buy_size >= float(config.min_order_usd):
                     logging.info(f"[{ex_id}] Bear scaling: {asset} position reduced to {config.bear_position_scale:.0%}")
             # Derivatives position modifier (funding rate + L/S ratio)

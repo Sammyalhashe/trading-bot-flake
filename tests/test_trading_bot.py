@@ -696,3 +696,35 @@ class TestRegimeHysteresis:
         assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
         assert trading_bot.apply_regime_hysteresis("BULL") == "BEAR"
         assert trading_bot.apply_regime_hysteresis("BULL") == "BULL"
+
+
+class TestBearPositionScale:
+    """BEAR_POSITION_SCALE caps the whole position, so per-scan top-ups can't regrow it."""
+
+    def _run_bear_scan(self, mock_executor, mock_data_provider, held_btc):
+        import trading_bot
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 10000.0}, "crypto": {"BTC": held_btc}}
+        if held_btc:
+            trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 100.0)
+        candidate = {"asset": "BTC", "product_id": "BTC-USDC", "score": 3.0, "rsi": 55.0, "momentum": 3.0}
+        with patch.object(trading_bot.strategy, "scan_entry", return_value=candidate), \
+             patch.object(trading_bot.config, "max_concurrent_positions", 5), \
+             patch.object(trading_bot.config, "bear_position_scale", 0.25):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+        return [c.kwargs["amount_quote_currency"] for c in _buy_calls(mock_executor)]
+
+    def test_fresh_bear_entry_stays_within_scaled_cap(self, temp_state_file, mock_executor, mock_data_provider):
+        buys = self._run_bear_scan(mock_executor, mock_data_provider, held_btc=0.0)
+        assert buys, "a BEAR momentum candidate should still be bought"
+        assert buys[0] <= 0.25 * 10000.0 / 5 + 0.01
+
+    def test_bear_top_up_stops_at_scaled_cap(self, temp_state_file, mock_executor, mock_data_provider):
+        # $600 of BTC already exceeds 25% of the $2,120 per-asset cap
+        buys = self._run_bear_scan(mock_executor, mock_data_provider, held_btc=6.0)
+        assert buys == []
+
+    def test_bear_top_up_fills_only_remaining_scaled_room(self, temp_state_file, mock_executor, mock_data_provider):
+        # cap = 25% of (10000 + 400) / 5 = $520; $400 held leaves $120
+        buys = self._run_bear_scan(mock_executor, mock_data_provider, held_btc=4.0)
+        assert len(buys) == 1
+        assert buys[0] <= 120.0 + 0.01
