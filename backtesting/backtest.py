@@ -35,8 +35,23 @@ logger = logging.getLogger(__name__)
 CANDLE_LOOKBACK = 300  # indicators need at most ~55 candles; avoids copying full history each bar
 
 
+class HistoricalDataProvider:
+    """Serves the current bar's candle slices through the live data-provider interface."""
+
+    def __init__(self, dfs: Dict[str, pd.DataFrame]):
+        self.dfs = dfs
+
+    def get_market_data(self, product_id, window, granularity="1h"):
+        df = self.dfs.get(product_id.split('-')[0])
+        if df is None:
+            return None
+        return df.tail(window + 10).rename(columns={'timestamp': 'start'})
+
+
 class BacktestEngine:
     """Backtesting engine for trading strategies."""
+
+    EXECUTOR_ID = "backtest"
 
     def __init__(self, config: TradingConfig, initial_capital: float = 10000):
         self.config = config
@@ -57,7 +72,9 @@ class BacktestEngine:
             ma_long_window=config.ma_long_window,
             enable_btc_dominance=False  # Disabled for backtesting
         )
-        self.risk_manager = RiskManager(config, initial_capital)
+        self.current_time = None
+        self.risk_manager = RiskManager(config, initial_capital,
+                                        clock=lambda: self.current_time.timestamp())
 
     def load_data(self, csv_path: str) -> pd.DataFrame:
         """Load historical OHLCV data from CSV."""
@@ -65,35 +82,6 @@ class BacktestEngine:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.sort_values('timestamp').reset_index(drop=True)
         return df
-
-    def detect_regime(self, df: pd.DataFrame) -> Tuple[str, str]:
-        """Detect market regime from price data."""
-        # Use last N candles for regime detection
-        regime_df = df.tail(max(self.config.ma_long_window, 50))
-
-        ma_short, ma_long = self.ta.analyze_trend(regime_df)
-
-        if ma_short is None or ma_long is None:
-            return "NEUTRAL", "NEUTRAL"
-
-        # Simple regime classification
-        if ma_short > ma_long * 1.05:
-            full_regime = "STRONG_BULL"
-            market_regime = "BULL"
-        elif ma_short > ma_long * 1.002:
-            full_regime = "BULL"
-            market_regime = "BULL"
-        elif ma_short < ma_long * 0.95:
-            full_regime = "STRONG_BEAR"
-            market_regime = "BEAR"
-        elif ma_short < ma_long * 0.998:
-            full_regime = "BEAR"
-            market_regime = "BEAR"
-        else:
-            full_regime = "NEUTRAL"
-            market_regime = "NEUTRAL"
-
-        return market_regime, full_regime
 
     def get_portfolio_value(self, prices: Dict[str, float]) -> float:
         """Calculate total portfolio value."""
@@ -116,22 +104,25 @@ class BacktestEngine:
         logger.info(f"Starting backtest with strategy: {strategy_name}")
         logger.info(f"Initial capital: ${self.initial_capital:,.2f}")
 
-        # Load all data files
+        # Load all data files; rows before `start` are kept as indicator warmup.
         datasets = {}
         for file_path in data_files:
             path = Path(file_path)
-            asset = path.stem.split('_')[0].replace('_', '-')  # BTC_USD -> BTC-USD
-            datasets[asset] = self.load_data(file_path)
-            if start is not None:
-                datasets[asset] = datasets[asset][datasets[asset]['timestamp'] >= pd.Timestamp(start)]
+            asset = path.stem.split('_')[0]  # BTC_USD_1h_full -> BTC
+            df = self.load_data(file_path)
             if end is not None:
-                datasets[asset] = datasets[asset][datasets[asset]['timestamp'] <= pd.Timestamp(end)]
-            datasets[asset] = datasets[asset].reset_index(drop=True)
+                df = df[df['timestamp'] <= pd.Timestamp(end)]
+            datasets[asset] = df.reset_index(drop=True)
             logger.info(f"Loaded {len(datasets[asset])} candles for {asset}")
 
         if not datasets:
             logger.error("No data loaded")
             return {}
+
+        required = ["BTC", "ETH"] if self.config.enable_dual_regime else ["BTC"]
+        missing = [a for a in required if a not in datasets]
+        if missing:
+            raise ValueError(f"Live regime detection needs {', '.join(missing)} candles in the data files")
 
         # Create strategy instances
         strategies = {
@@ -141,34 +132,29 @@ class BacktestEngine:
             "mtf_trend": create_strategy("mtf_trend", self.ta, self.config),
         }
 
-        # Get the primary dataset for time iteration (use first asset)
-        primary_asset = list(datasets.keys())[0]
-        primary_df = datasets[primary_asset]
+        # Iterate on BTC's timeline, which also drives the regime as in live trading
+        clock_df = datasets["BTC"]
+        first_idx = max(self.config.ma_long_window, 50)
+        if start is not None:
+            first_idx = max(first_idx, int(clock_df['timestamp'].searchsorted(pd.Timestamp(start), side='left')))
 
-        # Ensure we have enough data for indicators
-        start_idx = max(self.config.ma_long_window, 50)
+        current_prices = {}
+        for idx in range(first_idx, len(clock_df)):
+            timestamp = clock_df.iloc[idx]['timestamp']
+            self.current_time = timestamp
 
-        # Iterate through time
-        for idx in range(start_idx, len(primary_df)):
-            timestamp = primary_df.iloc[idx]['timestamp']
-
-            # Get current prices for all assets
             current_prices = {}
             current_dfs = {}
-
             for asset, df in datasets.items():
-                # Find matching timestamp (or closest)
-                end = df['timestamp'].searchsorted(timestamp, side='right')
-                asset_df = df.iloc[max(0, end - CANDLE_LOOKBACK):end]
+                bar_end = df['timestamp'].searchsorted(timestamp, side='right')
+                asset_df = df.iloc[max(0, bar_end - CANDLE_LOOKBACK):bar_end]
                 if len(asset_df) > 0:
                     current_prices[asset] = asset_df.iloc[-1]['close']
                     current_dfs[asset] = asset_df
 
-            # Detect regime using primary asset
-            if primary_asset in current_dfs:
-                market_regime, full_regime = self.detect_regime(current_dfs[primary_asset])
-            else:
-                market_regime, full_regime = "NEUTRAL", "NEUTRAL"
+            # Live confirms regime changes over 3 scans (~6 min), a no-op at hourly resolution.
+            full_regime, market_regime = self.regime_detector.get_current_regime(
+                HistoricalDataProvider(current_dfs), self.config.enable_dual_regime)
 
             # Select strategy for auto mode
             if strategy_name == "auto":
@@ -181,14 +167,16 @@ class BacktestEngine:
             else:
                 current_strategy = strategies[strategy_name]
 
-            # Check exits first
+            # Drawdown guard is checked on the pre-trade value, exits always run (as in live)
+            trading_allowed, _ = self.risk_manager.check_circuit_breakers(
+                self.get_portfolio_value(current_prices), self.EXECUTOR_ID)
+
             self._check_exits(current_strategy, current_prices, current_dfs, timestamp)
 
-            # Check entries
-            self._check_entries(current_strategy, current_prices, current_dfs,
-                              market_regime, full_regime, timestamp)
+            if trading_allowed:
+                self._check_entries(current_strategy, current_prices, current_dfs,
+                                    market_regime, full_regime, timestamp)
 
-            # Record equity
             portfolio_value = self.get_portfolio_value(current_prices)
             self.equity_curve.append({
                 'timestamp': timestamp,
@@ -198,7 +186,7 @@ class BacktestEngine:
             })
 
         # Close all remaining positions at final prices
-        final_timestamp = primary_df.iloc[-1]['timestamp']
+        final_timestamp = clock_df.iloc[-1]['timestamp']
         for asset in list(self.positions.keys()):
             if asset in current_prices:
                 self._close_position(asset, current_prices[asset], 1.0,
@@ -237,10 +225,13 @@ class BacktestEngine:
             pos = self.positions[asset]
             price = prices[asset]
             df = dfs[asset]
+            bar = df.iloc[-1]
 
-            # Update high-water mark
-            if price > pos['hwm']:
-                pos['hwm'] = price
+            if self._stopped_out_intrabar(strategy, asset, pos, df, timestamp):
+                continue
+
+            # Live polls every ~2 min, so its HWM sees intrabar highs
+            pos['hwm'] = max(pos['hwm'], bar['high'], price)
 
             # Check exit conditions
             market_data = self._build_market_data(strategy, df)
@@ -259,6 +250,22 @@ class BacktestEngine:
             if should_exit:
                 pos['tp_flags'] = new_tp_flags
                 self._close_position(asset, price, sell_ratio, reason, timestamp)
+
+    def _stopped_out_intrabar(self, strategy, asset, pos, df, timestamp) -> bool:
+        """Fill the trailing stop at its price when the bar trades through it, as live polling would."""
+        if not hasattr(strategy, "trailing_stop_price") or len(df) < 2:
+            return False
+        before_bar = df.iloc[:-1]
+        bar = df.iloc[-1]
+        stop_price, stop_pct = strategy.trailing_stop_price(
+            before_bar, before_bar['close'].iloc[-1], pos['entry'], pos['hwm'], pos['tp_flags'])
+        if bar['low'] >= stop_price:
+            return False
+        fill = min(bar['open'], stop_price)
+        reason = (f"Trailing stop-loss triggered for {asset} (price ${fill:,.2f} < stop ${stop_price:,.2f}, "
+                  f"HWM=${pos['hwm']:,.2f}, ATR stop={stop_pct*100:.1f}%)")
+        self._close_position(asset, fill, 1.0, reason, timestamp)
+        return True
 
     def _in_stopout_cooldown(self, asset: str, timestamp) -> bool:
         cooldown_hours = float(self.config.stopout_cooldown_hours)

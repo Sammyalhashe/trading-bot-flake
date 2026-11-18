@@ -26,7 +26,8 @@ class RiskManager:
         self,
         config: TradingConfig,
         initial_capital: float,
-        state_manager=None
+        state_manager=None,
+        clock=time.time
     ):
         """Initialize risk manager.
 
@@ -35,10 +36,12 @@ class RiskManager:
             initial_capital: Starting capital for reference
             state_manager: Optional StateManager for persistence (live trading).
                           If None, uses in-memory tracking (backtesting).
+            clock: Returns the current time in epoch seconds; backtests pass bar time.
         """
         self.config = config
         self.initial_capital = initial_capital
         self.state_manager = state_manager
+        self._clock = clock
 
         # In-memory tracking for backtesting or when state_manager is None
         self._peak_values: dict[str, float] = {}  # executor_id -> peak value
@@ -96,7 +99,7 @@ class RiskManager:
 
             if dd_timestamp is None:
                 # First time detecting drawdown - record timestamp
-                self._drawdown_timestamps[executor_id] = time.time()
+                self._drawdown_timestamps[executor_id] = self._clock()
                 self._drawdown_paused[executor_id] = True
                 logger.warning(
                     f"[{executor_id}] Drawdown {drawdown_pct:.1f}% exceeds limit {max_dd}%. "
@@ -106,7 +109,7 @@ class RiskManager:
 
             else:
                 # Check cooldown duration
-                hours_paused = (time.time() - dd_timestamp) / 3600
+                hours_paused = (self._clock() - dd_timestamp) / 3600
                 cooldown_hours = self.config.drawdown_cooldown_hours
 
                 if hours_paused >= cooldown_hours:
@@ -333,7 +336,7 @@ class RiskManager:
         }
 
         if dd_timestamp is not None:
-            hours_paused = (time.time() - dd_timestamp) / 3600
+            hours_paused = (self._clock() - dd_timestamp) / 3600
             metrics["hours_paused"] = hours_paused
 
         return metrics

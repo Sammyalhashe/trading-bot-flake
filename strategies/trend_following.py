@@ -168,6 +168,21 @@ class TrendFollowingStrategy:
     def rank_candidates(self, candidates: list[dict]) -> list[dict]:
         return sorted(candidates, key=lambda x: x["score"], reverse=True)
 
+    def trailing_stop_price(self, df, price: float, entry: float, hwm: float, tp_flags: dict) -> tuple[float, float]:
+        """ATR trailing stop below the HWM, floored at entry once TP1 has hit. Returns (stop_price, stop_pct)."""
+        atr = self.ta.calculate_atr(df)
+        if atr is not None and price > 0:
+            atr_stop = float(self.config.atr_stop_multiplier) * atr / price
+            stop_pct = max(float(self.config.atr_stop_min_pct),
+                           min(float(self.config.atr_stop_max_pct), atr_stop))
+        else:
+            stop_pct = float(self.config.trailing_stop_pct)
+
+        stop_price = hwm * (1 - stop_pct)
+        if tp_flags.get("tp1_hit", False) and entry > stop_price:
+            stop_price = entry
+        return stop_price, stop_pct
+
     def check_exit(self, asset: str, product_id: str, market_data, price: float,
                    entry: float, hwm: float, tp_flags: dict,
                    state: dict, entry_key: str, round_trip_fee_pct=None) -> tuple[bool, float, str, dict]:
@@ -181,7 +196,6 @@ class TrendFollowingStrategy:
         tp1_ratio = float(self.config.take_profit_1_sell_ratio)
         tp2_pct = float(self.config.take_profit_2_pct)
         tp2_ratio = float(self.config.take_profit_2_sell_ratio)
-        trailing_stop = float(self.config.trailing_stop_pct)
 
         # Priority 1: Take-Profit Level 2
         if not tp_flags.get("tp2_hit", False) and price >= entry * (1 + tp2_pct):
@@ -200,20 +214,7 @@ class TrendFollowingStrategy:
 
         # Priority 3: ATR trailing stop
         elif True:
-            atr = self.ta.calculate_atr(df)
-            if atr is not None and price > 0:
-                atr_stop = float(self.config.atr_stop_multiplier) * atr / price
-                atr_stop = max(float(self.config.atr_stop_min_pct),
-                               min(float(self.config.atr_stop_max_pct), atr_stop))
-                effective_trailing_stop = atr_stop
-            else:
-                effective_trailing_stop = trailing_stop
-
-            stop_price = hwm * (1 - effective_trailing_stop)
-
-            # After TP1, raise stop floor to entry (breakeven protection)
-            if tp_flags.get("tp1_hit", False) and entry > stop_price:
-                stop_price = entry
+            stop_price, effective_trailing_stop = self.trailing_stop_price(df, price, entry, hwm, tp_flags)
 
             if price < stop_price:
                 sell_trigger = True

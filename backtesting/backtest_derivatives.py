@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple
 from config import TradingConfig
 from core import TechnicalAnalysis, RegimeDetector, RiskManager
 from strategies import create_strategy
-from backtesting.backtest import BacktestEngine
+from backtesting.backtest import BacktestEngine, HistoricalDataProvider
 
 
 # Same override as collect_derivatives_data.py, so it can read what the packaged collector wrote.
@@ -330,10 +330,9 @@ def run_comparison(ohlcv_files: List[str], start_date: str, end_date: str) -> No
                     current_prices[asset] = float(asset_df.iloc[-1]["close"])
                     current_dfs[asset] = asset_df
 
-            if primary_asset in current_dfs:
-                market_regime, full_regime = engine.detect_regime(current_dfs[primary_asset])
-            else:
-                market_regime, full_regime = "NEUTRAL", "NEUTRAL"
+            full_regime, market_regime = engine.regime_detector.get_current_regime(
+                HistoricalDataProvider({a.split("-")[0]: df for a, df in current_dfs.items()}),
+                config.enable_dual_regime)
 
             engine._check_exits(strategy, current_prices, current_dfs, timestamp)
             engine._check_entries(strategy, current_prices, current_dfs, market_regime, full_regime, timestamp)
