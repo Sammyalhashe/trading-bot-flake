@@ -359,6 +359,32 @@ class TestImplausibleValueGuard:
         mock_executor.place_market_order.assert_called_once_with("BTC-USDC", 'SELL', amount_base_currency=0.5)
 
 
+class TestRegimeSkip:
+    def test_skipped_regime_places_no_buys(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        prices = [100.0 + 0.1 * (i // 2) + (0.25 if i % 2 == 0 else 0.1) for i in range(60)]
+        mock_data_provider.get_market_data.return_value = make_candle_df(prices, volumes=[200000.0] * 60)
+        mock_data_provider.get_product_details.return_value = {
+            "price": str(prices[-1]), "quote_increment": "0.01", "base_increment": "0.001"}
+
+        with patch.object(trading_bot.strategy, "should_skip_regime", return_value=True):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL", full_regime="BULL")
+
+        assert [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'BUY'] == []
+
+    def test_unskipped_regime_still_buys(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        prices = [100.0 + 0.1 * (i // 2) + (0.25 if i % 2 == 0 else 0.1) for i in range(60)]
+        mock_data_provider.get_market_data.return_value = make_candle_df(prices, volumes=[200000.0] * 60)
+        mock_data_provider.get_product_details.return_value = {
+            "price": str(prices[-1]), "quote_increment": "0.01", "base_increment": "0.001"}
+
+        with patch.object(trading_bot.strategy, "should_skip_regime", return_value=False):
+            trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL", full_regime="BULL")
+
+        assert [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'BUY']
+
+
 class TestConfirmableOrderId:
     def test_live_coinbase_response_is_confirmed(self):
         import trading_bot

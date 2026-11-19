@@ -552,8 +552,7 @@ def _portfolio_value_implausible(ex_id, ex_value):
 
 def _entries_allowed(ex_id, ex_value):
     """Update peak/drawdown via the circuit breakers; False when they trip or the control channel paused trading."""
-    trading_allowed, dd_reason = risk_manager.check_circuit_breakers(ex_value, ex_id)
-    drawdown_pct = risk_manager.get_current_drawdown(ex_value, ex_id)
+    trading_allowed, _ = risk_manager.check_circuit_breakers(ex_value, ex_id)
     if control.is_paused():
         trading_allowed = False
         logging.info(f"[{ex_id}] Trading paused via control channel — skipping new entries")
@@ -581,6 +580,7 @@ def _scan_entries(executor, ex_id, data_provider, market_regime, full_regime, he
     # Skip new entries if strategy says so for this regime
     if strategy.should_skip_regime(market_regime, full_regime):
         logging.info(f"[{ex_id}] {full_regime} regime — {strategy.name} skipping new entries")
+        return []
 
     asset_candidates = []
     # Get assets supported by this executor
@@ -801,7 +801,6 @@ def _manage_exits(executor, ex_id, data_provider, held_avail, state, full_regime
                 logging.warning(f"[{ex_id}] Auto-adopting unmanaged {asset} ({amt:.6f}) at current price ${price:,.2f}")
                 update_entry_price(ex_id, product_id, price)
                 state = load_state()
-                entry = price
                 # Skip exit checks this cycle — let it establish a HWM first
                 continue
 

@@ -90,6 +90,11 @@ ONCHAIN_ROUND_TRIP_FEE_PCT = Decimal(os.environ.get("ONCHAIN_ROUND_TRIP_FEE_PCT"
 PRICE_PROBE_USDC = 10
 
 
+def _to_raw(amount, decimals):
+    """Human amount to raw token units without float error (0.29 * 10**8 is 28999999.99... in floats)."""
+    return int(Decimal(str(amount)) * 10 ** decimals)
+
+
 def _make_web3(url):
     return Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 30}))
 
@@ -460,9 +465,10 @@ class EthereumExecutor(AerodromeMixin, ZeroExMixin, KyberSwapMixin, CowMixin):
             for item in extra.split(","):
                 try:
                     addr, sym = item.split(":")
-                    if sym.strip().upper() == asset.upper():
-                        return addr.strip()
-                except: pass
+                except ValueError:
+                    continue
+                if sym.strip().upper() == asset.upper():
+                    return addr.strip()
         return None
 
     def _approve_token(self, token_address, amount, spender=AERODROME_ROUTER_ADDRESS):
@@ -736,7 +742,7 @@ class EthereumExecutor(AerodromeMixin, ZeroExMixin, KyberSwapMixin, CowMixin):
                 if not amount_quote_currency:
                     logging.error("BUY requires amount_quote_currency")
                     return None
-                amount_in = int(amount_quote_currency * (10 ** usdc_decimals))
+                amount_in = _to_raw(amount_quote_currency, usdc_decimals)
                 token_in = usdc_addr
                 token_out = token_addr
             else:  # SELL
@@ -757,7 +763,7 @@ class EthereumExecutor(AerodromeMixin, ZeroExMixin, KyberSwapMixin, CowMixin):
                 if not amount_base_currency:
                     logging.error("SELL requires amount_base_currency or amount_quote_currency (with price)")
                     return None
-                amount_in = int(amount_base_currency * (10 ** token_decimals))
+                amount_in = _to_raw(amount_base_currency, token_decimals)
                 token_in = token_addr
                 token_out = usdc_addr
 

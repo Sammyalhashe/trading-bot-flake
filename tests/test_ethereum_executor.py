@@ -548,6 +548,21 @@ class TestPlaceMarketOrder:
         assert result["success"] is False and "reference price" in result["error"]
         router.functions.getAmountsOut.assert_not_called()
 
+    @pytest.mark.parametrize("product, side, kwargs, raw", [
+        ("BTC-USDC", "SELL", {"amount_base_currency": 0.29}, 29_000_000),      # float: 28999999.999...
+        ("BTC-USDC", "BUY", {"amount_quote_currency": 8.2}, 8_200_000),        # float: 8199999.999...
+    ])
+    def test_human_amounts_convert_to_exact_raw_units(self, executor, monkeypatch, product, side, kwargs, raw):
+        swap = MagicMock(return_value={"success": True})
+        monkeypatch.setattr(executor, "execute_swap", swap)
+        executor.place_market_order(product, side, reference_price=60_000, **kwargs)
+        assert swap.call_args.args[2] == raw
+
+    def test_malformed_extra_token_entries_are_skipped(self, executor, monkeypatch):
+        monkeypatch.setenv("EXTRA_TOKENS", "garbage,0x00000000000000000000000000000000000000Ab:FOO")
+        assert executor.get_token_address("FOO-USDC") == "0x00000000000000000000000000000000000000Ab"
+        assert executor.get_token_address("BAR-USDC") is None
+
     def test_paper_mode_never_touches_chain(self, executor):
         executor.trading_mode = "paper"
         router, _ = _install_router(executor, _best_direct_volatile)
