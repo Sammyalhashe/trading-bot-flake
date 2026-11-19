@@ -6,7 +6,7 @@ from eth_abi import encode as abi_encode
 from web3 import Web3
 
 from ..cow_client import CowError
-from .common import KillSwitchEngaged, _same_address, onchain_kill_switch_engaged
+from .common import KillSwitchEngaged, _same_address, onchain_kill_switch_engaged, retry_rpc_call
 
 # CoW Protocol on Base. Settlement.vaultRelayer() and domainSeparator() were read on chain and
 # match these constants (see tests).
@@ -35,6 +35,9 @@ def cow_order_digest(order):
          Web3.keccak(text=order["kind"]), order["partiallyFillable"], Web3.keccak(text=order["sellTokenBalance"]),
          Web3.keccak(text=order["buyTokenBalance"])])
     return Web3.keccak(b"\x19\x01" + COW_DOMAIN_SEPARATOR + Web3.keccak(struct))
+
+
+ERC20_TRANSFER_TOPIC = bytes(Web3.keccak(text="Transfer(address,address,uint256)"))
 
 
 class CowMixin:
@@ -91,9 +94,29 @@ class CowMixin:
             return {**base, "success": False, "pending": True, "error": f"CoW order {status}; do not resubmit"}
 
         trade = (self.cow.trades(uid) or [{}])[0]
-        received = self._token_balance(token_out, trade.get("blockNumber") or "latest") - before
+        if trade.get("txHash"):
+            received = self._settled_amount(trade["txHash"], token_out)
+        else:
+            logging.warning(f"CoW order {uid} has no settlement tx yet; measuring the fill by balance change")
+            received = self._token_balance(token_out, trade.get("blockNumber") or "latest") - before
         self._check_received(token_out, received, our_min, uid)
         return {**base, "success": True, "confirmed": True, "tx_hash": trade.get("txHash"), "received": received}
+
+    def _settled_amount(self, tx_hash, token):
+        """token paid to us by the settlement contract in tx_hash, read from the trusted RPC's receipt.
+        Other inflows can't inflate it; a reverted settlement pays nothing."""
+        receipt = retry_rpc_call(lambda: self.trusted_w3.eth.get_transaction_receipt(tx_hash))
+        if receipt.get("status") != 1:
+            logging.error(f"CoW settlement {tx_hash} did not succeed (status {receipt.get('status')})")
+            return 0
+        settlement, wallet = COW_SETTLEMENT_ADDRESS.lower(), self.account.address.lower()
+        total = 0
+        for log in receipt.get("logs") or []:
+            topics = log.get("topics") or []
+            if (len(topics) == 3 and bytes(topics[0]) == ERC20_TRANSFER_TOPIC and _same_address(log.get("address"), token)
+                    and "0x" + bytes(topics[1])[-20:].hex() == settlement and "0x" + bytes(topics[2])[-20:].hex() == wallet):
+                total += int.from_bytes(bytes(log["data"]), "big")
+        return total
 
     def _cow_quote(self, token_in, token_out, amount_in):
         """Returns (quote id, buyAmount net of network costs) after checking the quote echoes our order."""

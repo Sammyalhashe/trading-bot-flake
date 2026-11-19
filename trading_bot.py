@@ -384,6 +384,15 @@ def _executor_round_trip_fee(executor):
     return fee if Decimal(str(fee)).is_finite() and fee >= 0 else None
 
 
+def _confirmable_order_id(result):
+    """Exchange order id to confirm a fill with, or None to book at the requested price. Only exchange
+    and paper-ledger orders carry success_response; a bare order_id is CoinbaseExecutor's simulated order."""
+    success = result.get("success_response")
+    if not isinstance(success, dict):
+        return None
+    return result.get("order_id") or success.get("order_id")
+
+
 def _place_exit_order(executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss):
     """Place an exit and confirm the fill. Returns (status, exit_price, sell_fee); status is filled, dust or failed."""
     if is_stop_loss and hasattr(executor, 'place_aggressive_limit_order'):
@@ -417,7 +426,7 @@ def _place_exit_order(executor, ex_id, asset, product_id, price, sell_amount, is
     if isinstance(result, dict) and result.get("confirmed"):
         logging.info(f"[{ex_id}] Sell {asset} confirmed on-chain at ${price:,.2f}")
     elif isinstance(result, dict):
-        order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+        order_id = _confirmable_order_id(result)
         if order_id and hasattr(executor, 'check_order_filled'):
             fill_info = executor.check_order_filled(order_id)
             if fill_info:
@@ -535,7 +544,7 @@ def _portfolio_value_implausible(ex_id, ex_value):
     if peak > 0 and ex_value < peak * 0.10:
         logging.error(
             f"[{ex_id}] Portfolio value ${ex_value:,.2f} is <10% of peak ${peak:,.2f} — "
-            f"likely API failure, skipping drawdown check this cycle"
+            f"likely API failure, skipping drawdown check and new entries this cycle"
         )
         return True
     return False
@@ -703,7 +712,7 @@ def _place_entries(executor, ex_id, data_provider, asset_candidates, market_regi
                             logging.warning(f"[{ex_id}] Buy {asset} failed: {result.get('error', 'unknown')}")
                         else:
                             # Coinbase path: check order_id for fill confirmation
-                            order_id = result.get("order_id") or result.get("success_response", {}).get("order_id") if isinstance(result.get("success_response"), dict) else None
+                            order_id = _confirmable_order_id(result)
                             if order_id and hasattr(executor, 'check_order_filled'):
                                 fill_info = executor.check_order_filled(order_id)
                                 if fill_info:
@@ -840,9 +849,8 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
     ex_value, asset_prices = _portfolio_value(ex_id, data_provider, cash_total, held_total)
     logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
 
-    if _portfolio_value_implausible(ex_id, ex_value):
-        return ex_value
-    trading_allowed = _entries_allowed(ex_id, ex_value)
+    # A bad balance read must not move the drawdown peak or open positions, but exits still run.
+    trading_allowed = not _portfolio_value_implausible(ex_id, ex_value) and _entries_allowed(ex_id, ex_value)
 
     if reset_to_usdc:
         _liquidate_to_usdc(executor, ex_id, held_avail, asset_prices)
@@ -1227,7 +1235,8 @@ def run_ws_mode():
                     _state_cache.setdefault("high_water_marks", {})[entry_key] = hwm
 
             sell_trigger, sell_ratio, reason, tp_flags = strategy.check_exit(
-                asset, product_id, market_data, price, entry, hwm, tp_flags, _state_cache, entry_key
+                asset, product_id, market_data, price, entry, hwm, tp_flags, _state_cache, entry_key,
+                round_trip_fee_pct=_executor_round_trip_fee(cb_executor)
             )
             if not (new_high or sell_trigger):
                 return

@@ -37,6 +37,7 @@ class KyberSwapMixin:
                 if refusal:
                     return {"success": False, "error": refusal}
 
+                self._require_code(KYBER_ROUTER_ADDRESS)
                 if self._approve_token(token_in, amount_in, spender=KYBER_ROUTER_ADDRESS) is None:
                     logging.error(f"Token approval failed for {token_in}, cannot execute swap")
                     return {"success": False, "error": "approval failed"}
@@ -49,7 +50,6 @@ class KyberSwapMixin:
                     return {"success": False, "error": refusal}
                 our_min = self._amount_out_minimum(quoted_out)
                 self._check_kyber_build(built, token_in, token_out, amount_in, our_min)
-                self._require_code(KYBER_ROUTER_ADDRESS)
                 logging.info(f"KyberSwap swap: in={amount_in} quoted={quoted_out} ourMin={our_min} gas={built.get('gas')}")
                 tx_hash = self._send_contract_tx(_RawContractCall(
                     self.trusted_w3, KYBER_ROUTER_ADDRESS, built["data"], int(built.get("gas") or 0) or None))

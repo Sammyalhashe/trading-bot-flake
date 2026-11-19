@@ -35,7 +35,7 @@ Safety knobs (env):
   ONCHAIN_KILL_SWITCH_FILE     if this file exists, all live swaps are disabled
                                (default $XDG_STATE_HOME/trading-bot/onchain_kill_switch)
                                Both are re-checked immediately before every signature.
-  ONCHAIN_ROUTER               aerodrome | zerox (default aerodrome)
+  ONCHAIN_ROUTER               aerodrome | zerox | kyberswap | cow (default aerodrome)
   ONCHAIN_ROUND_TRIP_FEE_PCT   round-trip cost used for this executor's fee floor and PnL
                                (default 0.006: pool fees + 0x fee + slippage, conservative)
   ZEROX_API_KEY                0x API key (zerox router)
@@ -95,7 +95,7 @@ def _make_web3(url):
 
 
 class EthereumExecutor(AerodromeMixin, ZeroExMixin, KyberSwapMixin, CowMixin):
-    """Swaps ERC-20s on Base via the Aerodrome Router or the 0x Swap API (ONCHAIN_ROUTER)."""
+    """Swaps ERC-20s on Base via Aerodrome, 0x, KyberSwap or CoW (ONCHAIN_ROUTER, or execute_swap(router=...))."""
     def __init__(self, rpc_url, private_key, trading_mode="paper", trusted_rpc_url=None):
         if ONCHAIN_ROUTER not in ONCHAIN_ROUTERS:
             raise ValueError(f"ONCHAIN_ROUTER={ONCHAIN_ROUTER!r} is not one of {ONCHAIN_ROUTERS}")

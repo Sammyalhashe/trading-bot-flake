@@ -313,6 +313,68 @@ class TestStopLossFallback:
         mock_executor.place_market_order.assert_not_called()
 
 
+class TestImplausibleValueGuard:
+    """Portfolio value under 10% of peak (likely a bad API read): no drawdown update or entries, but exits run."""
+    PEAK = 1_000_000.0
+
+    def _set_peak(self):
+        import trading_bot
+        trading_bot.save_peak_value(self.PEAK, "TestExecutor")
+
+    def test_stop_loss_still_fires(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        self._set_peak()
+        del mock_executor.place_aggressive_limit_order
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 1000.0}, "crypto": {"BTC": 1.0}}
+        mock_data_provider.get_product_details.return_value = {
+            "price": "150.0", "quote_increment": "0.01", "base_increment": "0.001"}
+        trading_bot.update_entry_price("TestExecutor", "BTC-USDC", 200.0)
+
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BEAR")
+
+        sells = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'SELL']
+        assert sells, "stop-loss must run even when the portfolio value looks implausible"
+
+    def test_no_entries_and_peak_untouched(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        self._set_peak()
+        prices = [100.0 + 0.1 * (i // 2) + (0.25 if i % 2 == 0 else 0.1) for i in range(60)]
+        mock_data_provider.get_market_data.return_value = make_candle_df(prices, volumes=[200000.0] * 60)
+        mock_data_provider.get_product_details.return_value = {
+            "price": str(prices[-1]), "quote_increment": "0.01", "base_increment": "0.001"}
+
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL")
+
+        buys = [c for c in mock_executor.place_limit_order.call_args_list if c[0][1] == 'BUY']
+        assert buys == []
+        assert trading_bot.load_peak_value("TestExecutor") == self.PEAK
+
+    def test_reset_to_usdc_still_sells(self, temp_state_file, mock_executor, mock_data_provider):
+        import trading_bot
+        self._set_peak()
+        mock_executor.get_balances.return_value = {"cash": {"USDC": 0.0}, "crypto": {"BTC": 0.5}}
+
+        trading_bot.run_executor_strategy(mock_executor, mock_data_provider, "BULL", reset_to_usdc=True)
+
+        mock_executor.place_market_order.assert_called_once_with("BTC-USDC", 'SELL', amount_base_currency=0.5)
+
+
+class TestConfirmableOrderId:
+    def test_live_coinbase_response_is_confirmed(self):
+        import trading_bot
+        result = {"success": True, "success_response": {"order_id": "abc", "product_id": "BTC-USDC"}}
+        assert trading_bot._confirmable_order_id(result) == "abc"
+
+    def test_simulated_order_id_is_not_confirmed(self):
+        import trading_bot
+        assert trading_bot._confirmable_order_id({"success": True, "order_id": "uuid-paper"}) is None
+
+    def test_top_level_id_preferred_when_response_present(self):
+        import trading_bot
+        result = {"success": True, "order_id": "top", "success_response": {"order_id": "nested"}}
+        assert trading_bot._confirmable_order_id(result) == "top"
+
+
 class TestResetToUsdcOnChain:
     def _eth_executor(self, crypto):
         from executors.ethereum_executor import EthereumExecutor
@@ -858,6 +920,16 @@ class TestWebSocketTickExit:
         state = trading_bot.load_state()
         assert state["high_water_marks"]["CoinbaseExecutor:BTC-USDC"] == pytest.approx(205.0)
         assert state["entry_prices"]["CoinbaseExecutor:ETH-USDC"] == 3000.0
+
+    def test_tick_exit_check_uses_executor_fee(self, temp_state_file):
+        import trading_bot
+        trading_bot.update_entry_price("CoinbaseExecutor", "BTC-USDC", 200.0)
+        executor = self._executor()
+        executor.round_trip_fee_pct = Decimal("0.0005")
+        on_tick = self._capture_on_tick(executor)
+        with patch.object(trading_bot.strategy, "check_exit", return_value=(False, 0, "", {})) as check:
+            on_tick("BTC-USD", 199.0)
+        assert check.call_args.kwargs["round_trip_fee_pct"] == Decimal("0.0005")
 
     def test_failed_tick_exit_is_throttled(self, temp_state_file):
         import trading_bot

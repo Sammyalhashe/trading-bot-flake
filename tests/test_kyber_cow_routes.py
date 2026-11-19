@@ -9,6 +9,7 @@ from eth_abi import encode
 from eth_account import Account
 from eth_utils import keccak
 from web3 import Web3
+from web3.datastructures import AttributeDict
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [TESTS, os.path.dirname(TESTS)]
@@ -120,8 +121,24 @@ def cow(executor, chain, monkeypatch):
     balances = iter([0, BUY_OUT])
     chain.token(BTC).functions.balanceOf.return_value.call.side_effect = lambda block_identifier: next(balances)
     monkeypatch.setattr(eth_mod.time, "sleep", lambda s: None)
+    settle(executor, [transfer_log(BTC, COW_SETTLEMENT_ADDRESS, WALLET, BUY_OUT)])
     executor.cow = FakeCow()
     return executor.cow
+
+
+TRANSFER_TOPIC = Web3.keccak(text="Transfer(address,address,uint256)")
+
+
+def transfer_log(token, sender, to, amount):
+    pad = lambda a: bytes(12) + bytes.fromhex(a[2:])
+    return AttributeDict({"address": Web3.to_checksum_address(token),
+                          "topics": [TRANSFER_TOPIC, pad(sender), pad(to)], "data": amount.to_bytes(32, "big")})
+
+
+def settle(executor, logs, status=1):
+    receipt = AttributeDict({"status": status, "gasUsed": 400_000, "blockNumber": 38_000_001, "logs": logs})
+    executor.trusted_w3.eth.get_transaction_receipt.side_effect = (
+        lambda h: receipt if h == "0x" + "cd" * 32 else AttributeDict({"status": 1, "blockNumber": 38_000_001}))
 
 
 def buy(executor, router, reference_price=REFERENCE, recipient=None):
@@ -201,6 +218,11 @@ class TestKyberRejections:
         result = executor.execute_swap(USDC, STRANGER, BUY_IN, WALLET, reference_price=1, router="kyberswap")
         assert result["success"] is False and signed == []
 
+    def test_router_without_code_refused_before_approval(self, executor, kyber, signed):
+        executor.trusted_w3.eth.get_code.return_value = b""
+        assert buy(executor, "kyberswap")["success"] is False
+        assert signed == []
+
     def test_kill_switch_blocks(self, executor, kyber, signed, tmp_path):
         (tmp_path / "kill").write_text("x")
         assert buy(executor, "kyberswap")["success"] is False
@@ -253,10 +275,33 @@ class TestCowHappyPath:
         assert approvals(chain, USDC)[-1] == (COW_VAULT_RELAYER_ADDRESS, 0)
 
     def test_short_fill_engages_kill_switch(self, executor, chain, cow, tmp_path):
-        balances = iter([0, floor(BUY_OUT) - 1])
-        chain.tokens[BTC.lower()].functions.balanceOf.return_value.call.side_effect = lambda block_identifier: next(balances)
+        settle(executor, [transfer_log(BTC, COW_SETTLEMENT_ADDRESS, WALLET, floor(BUY_OUT) - 1)])
         buy(executor, "cow")
         assert (tmp_path / "kill").exists()
+
+    def test_other_inflow_cannot_hide_short_fill(self, executor, chain, cow, tmp_path):
+        balances = iter([0, BUY_OUT * 3])
+        chain.tokens[BTC.lower()].functions.balanceOf.return_value.call.side_effect = lambda block_identifier: next(balances)
+        settle(executor, [transfer_log(BTC, COW_SETTLEMENT_ADDRESS, WALLET, floor(BUY_OUT) - 1)])
+        result = buy(executor, "cow")
+        assert result["received"] == floor(BUY_OUT) - 1
+        assert (tmp_path / "kill").exists()
+
+    def test_only_settlement_transfers_of_bought_token_to_us_count(self, executor, cow):
+        settle(executor, [transfer_log(BTC, COW_SETTLEMENT_ADDRESS, WALLET, BUY_OUT),
+                          transfer_log(BTC, STRANGER, WALLET, 999),
+                          transfer_log(BTC, COW_SETTLEMENT_ADDRESS, STRANGER, 999),
+                          transfer_log(WETH, COW_SETTLEMENT_ADDRESS, WALLET, 999)])
+        assert buy(executor, "cow")["received"] == BUY_OUT
+
+    def test_reverted_settlement_counts_nothing(self, executor, cow, tmp_path):
+        settle(executor, [transfer_log(BTC, COW_SETTLEMENT_ADDRESS, WALLET, BUY_OUT)], status=0)
+        assert buy(executor, "cow")["received"] == 0
+        assert (tmp_path / "kill").exists()
+
+    def test_falls_back_to_balance_without_settlement_tx(self, executor, cow):
+        cow.trades = lambda uid: []
+        assert buy(executor, "cow")["received"] == BUY_OUT
 
 
 COW_REJECTIONS = {
@@ -283,6 +328,32 @@ class TestCowRejections:
                             lambda *a, **k: ((tmp_path / "kill").write_text("x"), real_approve(*a, **k))[1])
         assert buy(executor, "cow")["success"] is False
         assert cow.posted == []
+
+
+class TestKillSwitchIsolated:
+    """Each check must hold on its own, not only via _send_contract_tx's pre-signature check."""
+
+    def test_cow_switch_engaged_after_approval_blocks_signing(self, executor, cow, tmp_path, monkeypatch):
+        real_approve = executor._approve_token
+
+        def approve_then_engage(*args, **kwargs):
+            result = real_approve(*args, **kwargs)
+            (tmp_path / "kill").write_text("x")
+            return result
+        monkeypatch.setattr(executor, "_approve_token", approve_then_engage)
+        sign = MagicMock(wraps=executor._sign_cow_order)
+        monkeypatch.setattr(executor, "_sign_cow_order", sign)
+
+        assert buy(executor, "cow")["success"] is False
+        sign.assert_not_called()
+        assert cow.posted == []
+
+    def test_wrap_eth_checks_switch_before_anything_else(self, executor, tmp_path, monkeypatch):
+        send = MagicMock()
+        monkeypatch.setattr(executor, "_send_contract_tx", send)
+        (tmp_path / "kill").write_text("x")
+        assert executor.wrap_eth(10**16)["success"] is False
+        send.assert_not_called()
 
 
 class TestWrapEth:
