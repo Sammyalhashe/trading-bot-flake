@@ -35,12 +35,32 @@ def summarize(db_path, since_ts):
     return sorted(summary, key=lambda s: (s["asset"], s["size_usd"], s["median_bps"]))
 
 
+def summarize_fills(db_path, since_ts):
+    """Live test-swap fills (onchain_test_swap) per venue, asset and side."""
+    if not Path(db_path).exists():
+        return []
+    with sqlite3.connect(db_path) as db:
+        if not db.execute("select 1 from sqlite_master where name = 'fills'").fetchone():
+            return []
+        groups = defaultdict(list)
+        for venue, asset, side, slip, cost, gas in db.execute(
+                "select venue, asset, side, slippage_bps, cost_bps, gas_usd from fills where ts >= ?", (since_ts,)):
+            groups[(venue, asset, side)].append((slip, cost, gas))
+    return sorted(({"venue": venue, "asset": asset, "side": side, "n": len(rows),
+                    "median_slippage_bps": statistics.median(r[0] for r in rows),
+                    "median_cost_bps": statistics.median(r[1] for r in rows),
+                    "median_gas_usd": statistics.median(r[2] for r in rows)}
+                   for (venue, asset, side), rows in groups.items()),
+                  key=lambda r: (r["asset"], r["venue"], r["side"]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=float, default=7)
     parser.add_argument("--db", default=os.environ.get("PROBE_DB") or str(DEFAULT_DB))
     args = parser.parse_args()
-    summary = summarize(Path(args.db), time.time() - args.days * 86400)
+    since = time.time() - args.days * 86400
+    summary = summarize(Path(args.db), since)
     if not summary:
         print("No samples yet.")
         return
@@ -49,6 +69,13 @@ def main():
     for s in summary:
         print(f"{s['asset']:5} ${s['size_usd']:>8,.0f} {s['venue']:10} {s['n']:>4} {s['median_bps']:>7.1f} "
               f"{s['p90_bps']:>7.1f} {s['median_buy_bps']:>+8.1f} {s['median_gas_usd']:>7.4f}")
+    fills = summarize_fills(Path(args.db), since)
+    if fills:
+        print("\nLive test fills (bps; slippage vs quote, cost vs Coinbase mid)")
+        print(f"{'asset':5} {'venue':10} {'side':4} {'n':>4} {'slip':>7} {'cost':>7} {'gas $':>7}")
+        for f in fills:
+            print(f"{f['asset']:5} {f['venue']:10} {f['side']:4} {f['n']:>4} {f['median_slippage_bps']:>+7.1f} "
+                  f"{f['median_cost_bps']:>+7.1f} {f['median_gas_usd']:>7.4f}")
 
 
 if __name__ == "__main__":
