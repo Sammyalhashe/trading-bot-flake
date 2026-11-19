@@ -153,19 +153,96 @@ def make_aero_v2_quoter(executor):
 
 
 class ZeroExQuoter:
-    """0x indicative /price quotes (all-in, incl. 0x's own fee, recorded in `fees`)."""
+    """0x indicative /price quotes, all-in; 0x's own fee is kept in `notes`."""
 
     def __init__(self, client):
         self.client = client
-        self.fees = []
+        self.notes = []
 
     def __call__(self, token_in, token_out, amount_in, _option):
         response = self.client.price({"chainId": EXPECTED_CHAIN_ID, "sellToken": token_in,
                                       "buyToken": token_out, "sellAmount": str(amount_in)})
         if response.get("liquidityAvailable") is not True:
             raise RuntimeError("0x: no liquidity")
-        self.fees.append((response.get("fees") or {}).get("zeroExFee"))
+        self.notes.append({"zeroExFee": (response.get("fees") or {}).get("zeroExFee")})
         return int(response["buyAmount"]), int(response.get("gas") or 0)
+
+
+TOKEN_DECIMALS = {USDC.lower(): USDC_DECIMALS, **{ASSETS[a].lower(): d for a, d in DECIMALS.items()}}
+PROBE_ADDRESS = "0x0000000000000000000000000000000000000001"
+HTTP_TIMEOUT_SECONDS = 15
+
+
+class HttpQuoter:
+    def __init__(self, session=None):
+        self.session = session or requests.Session()
+        self.notes = []
+
+    def _json(self, response):
+        response.raise_for_status()
+        return response.json()
+
+
+class KyberSwapQuoter(HttpQuoter):
+    URL = "https://aggregator-api.kyberswap.com/base/api/v1/routes"
+
+    def __call__(self, token_in, token_out, amount_in, _option):
+        body = self._json(self.session.get(
+            self.URL, params={"tokenIn": token_in, "tokenOut": token_out, "amountIn": str(amount_in)},
+            headers={"x-client-id": "trading-bot-cost-probe"}, timeout=HTTP_TIMEOUT_SECONDS))
+        if body.get("code") != 0:
+            raise RuntimeError(f"KyberSwap: {body.get('message')}")
+        route = body["data"]["routeSummary"]
+        return int(route["amountOut"]), int(route.get("gas") or 0)
+
+
+class VeloraQuoter(HttpQuoter):
+    """Velora (ex-ParaSwap); its default partner fee is deducted via destAmountAfterFee."""
+    URL = "https://api.paraswap.io/prices"
+
+    def __call__(self, token_in, token_out, amount_in, _option):
+        body = self._json(self.session.get(self.URL, params={
+            "srcToken": token_in, "srcDecimals": TOKEN_DECIMALS[token_in.lower()],
+            "destToken": token_out, "destDecimals": TOKEN_DECIMALS[token_out.lower()],
+            "amount": str(amount_in), "side": "SELL", "network": EXPECTED_CHAIN_ID, "version": "6.2"},
+            timeout=HTTP_TIMEOUT_SECONDS))
+        route = body.get("priceRoute")
+        if not route:
+            raise RuntimeError(f"Velora: {body.get('error')}")
+        self.notes.append({"partnerFee": route.get("partnerFee")})
+        return int(route.get("destAmountAfterFee") or route["destAmount"]), int(route.get("gasCost") or 0)
+
+
+class OpenOceanQuoter(HttpQuoter):
+    URL = f"https://open-api.openocean.finance/v4/{EXPECTED_CHAIN_ID}/quote"
+
+    def __init__(self, session=None, gas_price_wei=0):
+        super().__init__(session)
+        self.gas_price_wei = gas_price_wei
+
+    def __call__(self, token_in, token_out, amount_in, _option):
+        body = self._json(self.session.get(self.URL, params={
+            "inTokenAddress": token_in, "outTokenAddress": token_out, "amountDecimals": str(amount_in),
+            "gasPriceDecimals": str(self.gas_price_wei)}, timeout=HTTP_TIMEOUT_SECONDS))
+        if body.get("code") != 200 or not body.get("data"):
+            raise RuntimeError(f"OpenOcean: {body.get('error') or body.get('code')}")
+        return int(body["data"]["outAmount"]), int(body["data"].get("estimatedGas") or 0)
+
+
+class CowQuoter(HttpQuoter):
+    """CoW Protocol: solvers pay gas from the sell amount, so buyAmount is already net of it."""
+    URL = "https://api.cow.fi/base/api/v1/quote"
+
+    def __call__(self, token_in, token_out, amount_in, _option):
+        body = self._json(self.session.post(self.URL, json={
+            "sellToken": token_in, "buyToken": token_out, "from": PROBE_ADDRESS, "receiver": PROBE_ADDRESS,
+            "kind": "sell", "sellAmountBeforeFee": str(amount_in), "signingScheme": "eip712",
+            "onchainOrder": False, "priceQuality": "optimal"}, timeout=HTTP_TIMEOUT_SECONDS))
+        quote = body.get("quote")
+        if not quote:
+            raise RuntimeError(f"CoW: {body.get('description')}")
+        self.notes.append({"feeAmount": quote.get("feeAmount"), "protocolFeeBps": body.get("protocolFeeBps")})
+        return int(quote["buyAmount"]), 0
 
 
 def make_zerox_quoter():
@@ -190,15 +267,18 @@ def run_probe():
     w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
 
     books = {asset: fetch_book(f"{asset}-USD") for asset in ASSETS}
-    gas_usd_per_unit = gas_usd(1, w3.eth.gas_price, book_mid(books["ETH"]))
+    gas_price_wei = w3.eth.gas_price
+    gas_usd_per_unit = gas_usd(1, gas_price_wei, book_mid(books["ETH"]))
     venues = {
         "univ3": (make_quoter(w3, UNIV3_QUOTER, "fee", "uint24"), UNIV3_FEE_TIERS),
         "slipstream": (make_quoter(w3, SLIPSTREAM_QUOTER, "tickSpacing", "int24"), SLIPSTREAM_TICK_SPACINGS),
         "aero_v2": (make_aero_v2_quoter(make_aero_v2_executor(rpc_url)), (None,)),
     }
-    zerox = make_zerox_quoter()
-    if zerox:
-        venues["zerox"] = (zerox, (None,))
+    for venue, quoter in (("kyberswap", KyberSwapQuoter()), ("velora", VeloraQuoter()),
+                          ("openocean", OpenOceanQuoter(gas_price_wei=gas_price_wei)), ("cow", CowQuoter()),
+                          ("zerox", make_zerox_quoter())):
+        if quoter:
+            venues[venue] = (quoter, (None,))
 
     now, rows = int(time.time()), []
     for asset, token in ASSETS.items():
@@ -206,12 +286,12 @@ def run_probe():
         for size in sizes:
             samples = [coinbase_sample(asset, size, books[asset], fee_per_side)]
             for venue, (quote, options) in venues.items():
-                if zerox:
-                    zerox.fees = []
+                if hasattr(quote, "notes"):
+                    quote.notes = []
                 best = best_roundtrip(quote, USDC, token, int(size * 10**USDC_DECIMALS), options)
                 sample = best and venue_sample(asset, size, venue, best, DECIMALS[asset], mid, gas_usd_per_unit)
-                if sample and venue == "zerox":
-                    sample["detail"] = json.dumps({**json.loads(sample["detail"]), "zeroExFee": zerox.fees})
+                if sample and getattr(quote, "notes", None):
+                    sample["detail"] = json.dumps({**json.loads(sample["detail"]), "notes": quote.notes})
                 if not sample:
                     logging.warning(f"{venue}: no usable quote for {asset} ${size:,.0f}")
                 samples.append(sample)

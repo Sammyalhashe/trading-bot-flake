@@ -111,7 +111,7 @@ class TestZeroEx:
         assert quoter(USDC, TOKEN, 1000, None) == (123, 150_000)
         params = client.price.call_args.args[0]
         assert params["chainId"] == 8453 and params["sellAmount"] == "1000"
-        assert quoter.fees == [{"amount": "5", "token": "usdc"}]
+        assert quoter.notes == [{"zeroExFee": {"amount": "5", "token": "usdc"}}]
 
     def test_no_liquidity_raises(self):
         client = MagicMock()
@@ -160,3 +160,57 @@ class TestReadOnly:
     def test_aero_v2_executor_has_no_account(self):
         executor = probe.make_aero_v2_executor("https://example.invalid")
         assert executor.account is None and executor.private_key is None
+
+
+def http_session(payload, status=200):
+    response = MagicMock(status_code=status)
+    response.json.return_value = payload
+    response.raise_for_status.side_effect = None if status == 200 else RuntimeError(f"HTTP {status}")
+    session = MagicMock()
+    session.get.return_value = session.post.return_value = response
+    return session
+
+
+BTC_TOKEN, USDC_TOKEN = probe.ASSETS["BTC"], probe.USDC
+
+
+class TestAggregators:
+    def test_kyberswap(self):
+        session = http_session({"code": 0, "data": {"routeSummary": {"amountOut": "1583", "gas": "250000"}}})
+        assert probe.KyberSwapQuoter(session)(USDC_TOKEN, BTC_TOKEN, 1000, None) == (1583, 250_000)
+        assert session.get.call_args.kwargs["params"]["amountIn"] == "1000"
+
+    def test_kyberswap_error_raises(self):
+        with pytest.raises(RuntimeError):
+            probe.KyberSwapQuoter(http_session({"code": 4008, "message": "no route"}))(USDC_TOKEN, BTC_TOKEN, 1, None)
+
+    def test_velora_uses_amount_after_partner_fee(self):
+        session = http_session({"priceRoute": {"destAmount": "1600", "destAmountAfterFee": "1590",
+                                               "gasCost": "300000", "partnerFee": 0.01}})
+        quoter = probe.VeloraQuoter(session)
+        assert quoter(USDC_TOKEN, BTC_TOKEN, 1000, None) == (1590, 300_000)
+        params = session.get.call_args.kwargs["params"]
+        assert (params["srcDecimals"], params["destDecimals"], params["network"]) == (6, 8, 8453)
+        assert quoter.notes == [{"partnerFee": 0.01}]
+
+    def test_openocean(self):
+        session = http_session({"code": 200, "data": {"outAmount": "1577", "estimatedGas": "900000"}})
+        assert probe.OpenOceanQuoter(session, gas_price_wei=10**7)(USDC_TOKEN, BTC_TOKEN, 1000, None) == (1577, 900_000)
+        assert session.get.call_args.kwargs["params"]["gasPriceDecimals"] == str(10**7)
+
+    def test_openocean_error_raises(self):
+        with pytest.raises(RuntimeError):
+            probe.OpenOceanQuoter(http_session({"code": 500, "error": "x"}), 1)(USDC_TOKEN, BTC_TOKEN, 1, None)
+
+    def test_cow_buy_amount_already_net_of_network_fee(self):
+        session = http_session({"quote": {"buyAmount": "1570", "sellAmount": "990", "feeAmount": "10"},
+                                "protocolFeeBps": "2"})
+        quoter = probe.CowQuoter(session)
+        assert quoter(USDC_TOKEN, BTC_TOKEN, 1000, None) == (1570, 0)
+        body = session.post.call_args.kwargs["json"]
+        assert body["kind"] == "sell" and body["sellAmountBeforeFee"] == "1000"
+        assert quoter.notes == [{"feeAmount": "10", "protocolFeeBps": "2"}]
+
+    def test_http_error_raises(self):
+        with pytest.raises(RuntimeError):
+            probe.KyberSwapQuoter(http_session({}, status=503))(USDC_TOKEN, BTC_TOKEN, 1, None)
