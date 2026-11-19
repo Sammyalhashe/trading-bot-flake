@@ -442,6 +442,21 @@ class TestStrategyConfig:
         config.strategy = "daily_trend"
         config.validate()
 
+    def test_every_registered_strategy_validates_and_builds(self):
+        from strategies import STRATEGIES, STRATEGY_NAMES, create_strategy
+        config = default_config()
+        for name in STRATEGY_NAMES:
+            config.strategy = name
+            config.validate()
+        for name in STRATEGIES:
+            assert create_strategy(name, make_ta(), config) is not None
+
+    def test_unknown_strategy_rejected(self):
+        config = default_config()
+        config.strategy = "not_a_strategy"
+        with pytest.raises(ValueError):
+            config.validate()
+
     def test_max_concurrent_positions_default(self):
         config = default_config()
         assert config.max_concurrent_positions == 5

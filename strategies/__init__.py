@@ -1,34 +1,28 @@
-"""Strategy factory for trading bot"""
-from core.strategy import Strategy
-from core.technical_analysis import TechnicalAnalysis
-from config.trading_config import TradingConfig
+"""Strategy registry and factory. STRATEGY_NAMES is the single list of valid STRATEGY values."""
+from importlib import import_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config.trading_config import TradingConfig
+    from core.strategy import Strategy
+    from core.technical_analysis import TechnicalAnalysis
+
+# name -> (module, class); modules are imported lazily so config can import this file.
+STRATEGIES = {
+    "trend_following": ("strategies.trend_following", "TrendFollowingStrategy"),
+    "mean_reversion": ("strategies.mean_reversion", "MeanReversionStrategy"),
+    "supertrend": ("strategies.supertrend", "SupertrendStrategy"),
+    "mtf_trend": ("strategies.mtf_trend", "MTFTrendStrategy"),
+    "daily_trend": ("strategies.daily_trend", "DailyTrendStrategy"),
+}
+
+# "auto" picks one of the above per market regime (see select_strategy_for_regime in trading_bot.py).
+STRATEGY_NAMES = (*STRATEGIES, "auto")
 
 
-def create_strategy(name: str, ta: TechnicalAnalysis, config: TradingConfig) -> Strategy:
-    """Create a strategy instance by name.
-
-    Args:
-        name: Strategy name ("trend_following", "mean_reversion", or "supertrend")
-        ta: TechnicalAnalysis instance
-        config: TradingConfig instance
-
-    Returns:
-        Strategy implementation
-    """
-    if name == "trend_following":
-        from strategies.trend_following import TrendFollowingStrategy
-        return TrendFollowingStrategy(ta, config)
-    elif name == "mean_reversion":
-        from strategies.mean_reversion import MeanReversionStrategy
-        return MeanReversionStrategy(ta, config)
-    elif name == "supertrend":
-        from strategies.supertrend import SupertrendStrategy
-        return SupertrendStrategy(ta, config)
-    elif name == "mtf_trend":
-        from strategies.mtf_trend import MTFTrendStrategy
-        return MTFTrendStrategy(ta, config)
-    elif name == "daily_trend":
-        from strategies.daily_trend import DailyTrendStrategy
-        return DailyTrendStrategy(ta, config)
-    else:
+def create_strategy(name: str, ta: "TechnicalAnalysis", config: "TradingConfig") -> "Strategy":
+    """Create a registered strategy instance by name."""
+    if name not in STRATEGIES:
         raise ValueError(f"Unknown strategy: {name}")
+    module, cls = STRATEGIES[name]
+    return getattr(import_module(module), cls)(ta, config)

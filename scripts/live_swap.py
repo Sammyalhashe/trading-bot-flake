@@ -6,7 +6,7 @@ import time
 import argparse
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from executors.ethereum_executor import EthereumExecutor, TOKENS
 from executors.log_redaction import url_host

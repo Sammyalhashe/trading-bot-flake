@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 # Add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from executors.ethereum_executor import EthereumExecutor
 

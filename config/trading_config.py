@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 import os
 
+from strategies import STRATEGY_NAMES
+
 
 @dataclass
 class TradingConfig:
@@ -206,9 +208,8 @@ class TradingConfig:
         errors = []
 
         # Strategy validation
-        valid_strategies = ["trend_following", "mean_reversion", "supertrend", "mtf_trend", "daily_trend", "auto"]
-        if self.strategy not in valid_strategies:
-            errors.append(f"Invalid strategy '{self.strategy}', must be one of {valid_strategies}")
+        if self.strategy not in STRATEGY_NAMES:
+            errors.append(f"Invalid strategy '{self.strategy}', must be one of {list(STRATEGY_NAMES)}")
 
         # Moving Average validation
         if self.ma_short_window >= self.ma_long_window:
