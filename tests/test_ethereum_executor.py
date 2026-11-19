@@ -12,6 +12,7 @@ from web3.datastructures import AttributeDict
 from web3.exceptions import ContractLogicError, TimeExhausted, TransactionNotFound
 
 import executors.ethereum_executor as eth_mod
+import executors.onchain.common as onchain_common
 from executors.ethereum_executor import (
     AERODROME_POOL_FACTORY_ADDRESS,
     AERODROME_ROUTER_ADDRESS,
@@ -74,7 +75,7 @@ def nonces():
 def executor(monkeypatch, tmp_path, nonces):
     """Live-mode executor with every trusted-RPC call mocked; no network access."""
     monkeypatch.delenv("ONCHAIN_KILL_SWITCH", raising=False)
-    monkeypatch.setattr(eth_mod, "ONCHAIN_KILL_SWITCH_FILE", str(tmp_path / "kill"))
+    monkeypatch.setattr(onchain_common, "ONCHAIN_KILL_SWITCH_FILE", str(tmp_path / "kill"))
     ex = EthereumExecutor("http://read.invalid", TEST_KEY, "live", trusted_rpc_url="http://trusted.invalid")
 
     ex.trusted_w3 = MagicMock()

@@ -17,6 +17,13 @@ RPC trust model:
     Point this at a paid/private endpoint you control.
   * Read-only failover pool (primary ``rpc_url`` + ``FALLBACK_RPCS``): balance reads only.
 
+Layout: this module is the transaction core (nonces, signing, approvals, guards, fill checks) and
+execute_swap's dispatch. Each route is a mixin in executors/onchain/ (aerodrome, zerox, kyberswap,
+cow); shared constants, the kill switch and RPC retry live in executors/onchain/common.py. Each
+setting below is defined in the one module that reads it (shared ones in common), so patch it
+there: e.g. tests patch onchain.common.ONCHAIN_KILL_SWITCH_FILE, which is deliberately not
+re-exported here.
+
 Safety knobs (env):
   ONCHAIN_SLIPPAGE_BPS         slippage tolerance applied to the live quote (default 50 = 0.5%)
   ONCHAIN_TX_DEADLINE_SECONDS  router deadline relative to the latest block (default 120)
@@ -41,153 +48,38 @@ import threading
 import time
 from decimal import Decimal
 
-from eth_abi import decode as abi_decode
-from eth_abi import encode as abi_encode
-from eth_abi.exceptions import DecodingError
 from web3 import Web3
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from .log_redaction import install_filter, redact, register_secret, register_url, url_host
-from .cow_client import CowClient, CowError
-from .kyberswap_client import KyberSwapClient, KyberSwapError
-from .zerox_client import ZeroExClient, ZeroExError
+from .cow_client import CowClient
+from .kyberswap_client import KyberSwapClient
+from .zerox_client import ZeroExClient
+from .onchain import common as onchain_common
+from .onchain.aerodrome import (  # noqa: F401  (re-exported)
+    AERODROME_POOL_FACTORY_ADDRESS, AERODROME_ROUTER_ABI, AERODROME_ROUTER_ADDRESS, AerodromeMixin,
+)
+from .onchain.common import (  # noqa: F401  (re-exported)
+    BALANCE_SCAN_TOKENS, ERC20_ABI, EXPECTED_CHAIN_ID, FALLBACK_RPCS, KNOWN_DECIMALS, LEGACY_TOKENS,
+    RECEIPT_TIMEOUT_SECONDS, SLIPPAGE_BPS, TOKENS, TX_DEADLINE_SECONDS, WETH_DEPOSIT_ABI, KillSwitchEngaged,
+    _RawContractCall, _receipt_fee_wei, _same_address, engage_onchain_kill_switch, onchain_kill_switch_engaged,
+    retry_rpc_call,
+)
+from .onchain.cow import (  # noqa: F401  (re-exported)
+    COW_APP_DATA, COW_DOMAIN_SEPARATOR, COW_ORDER_TYPEHASH, COW_ORDER_VALIDITY_SECONDS, COW_POLL_SECONDS,
+    COW_SETTLEMENT_ADDRESS, COW_VAULT_RELAYER_ADDRESS, CowMixin, cow_order_digest,
+)
+from .onchain.kyberswap import (  # noqa: F401  (re-exported)
+    KYBER_ROUTER_ADDRESS, KYBER_SWAP_SELECTOR, KYBER_SWAP_TYPES, KyberSwapMixin,
+)
+from .onchain.zerox import (  # noqa: F401  (re-exported)
+    ALLOWANCE_HOLDER_ADDRESS, ALLOWANCE_HOLDER_EXEC_SELECTOR, SETTLER_EXECUTE_SELECTOR, SETTLER_REGISTRY_ABI,
+    SETTLER_REGISTRY_ADDRESS, SETTLER_TAKER_SUBMITTED_FEATURE, ZEROX_MAX_QUOTE_AGE_BLOCKS, ZeroExMixin,
+    ZeroExQuoteRejected,
+)
 
-EXPECTED_CHAIN_ID = 8453  # Base Mainnet
-
-ERC20_ABI = [
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
-    {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
-    {"constant": False, "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "approve", "outputs": [{"name": "", "type": "bool"}], "type": "function"},
-    {"constant": True, "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}], "name": "allowance", "outputs": [{"name": "remaining", "type": "uint256"}], "type": "function"}
-]
-
-# Verified on Base mainnet via eth_call: Router.defaultFactory() == PoolFactory, selectors
-# 0x5509a1ac / 0xcac88ea9 present, and deadline/minOut reverts confirmed by simulation.
-AERODROME_ROUTER_ADDRESS = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
-AERODROME_POOL_FACTORY_ADDRESS = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
-
-_AERODROME_ROUTES_PARAM = {
-    "components": [
-        {"internalType": "address", "name": "from", "type": "address"},
-        {"internalType": "address", "name": "to", "type": "address"},
-        {"internalType": "bool", "name": "stable", "type": "bool"},
-        {"internalType": "address", "name": "factory", "type": "address"}
-    ],
-    "internalType": "struct IRouter.Route[]",
-    "name": "routes",
-    "type": "tuple[]"
-}
-
-AERODROME_ROUTER_ABI = [
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-            _AERODROME_ROUTES_PARAM
-        ],
-        "name": "getAmountsOut",
-        "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-            {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
-            _AERODROME_ROUTES_PARAM,
-            {"internalType": "address", "name": "to", "type": "address"},
-            {"internalType": "uint256", "name": "deadline", "type": "uint256"}
-        ],
-        "name": "swapExactTokensForTokens",
-        "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    }
-]
-
-# Pinned per the 0x-settler README (Cancun chains incl. Base). Settler itself is never pinned:
-# it is read from the registry's taker-submitted feature before every swap.
-ALLOWANCE_HOLDER_ADDRESS = "0x0000000000001fF3684f28c67538d4D072C22734"
-ALLOWANCE_HOLDER_EXEC_SELECTOR = "0x2213bc0b"  # exec(address,address,uint256,address,bytes)
-# ISettlerTakerSubmitted.execute(AllowedSlippage(recipient, buyToken, minAmountOut), bytes[] actions, bytes32)
-SETTLER_EXECUTE_SELECTOR = "0x1fff991f"
-SETTLER_REGISTRY_ADDRESS = "0x00000000000004533Fe15556B1E086BB1A72cEae"
-SETTLER_TAKER_SUBMITTED_FEATURE = 2
-SETTLER_REGISTRY_ABI = [
-    {"inputs": [{"name": "tokenId", "type": "uint256"}], "name": "ownerOf", "outputs": [{"name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"name": "featureId", "type": "uint128"}], "name": "prev", "outputs": [{"name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
-]
-
-# KyberSwap MetaAggregationRouterV2 (same address on all chains; code checked on Base). Only its
-# swap(SwapExecutionParams) entry point is accepted; the router enforces desc.minReturnAmount.
-KYBER_ROUTER_ADDRESS = "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5"
-KYBER_SWAP_SELECTOR = "0xe21fd0e9"
-KYBER_SWAP_TYPES = ["(address,address,bytes,(address,address,address[],uint256[],address[],uint256[],"
-                    "address,uint256,uint256,uint256,bytes),bytes)"]
-
-# CoW Protocol on Base. Settlement.vaultRelayer() and domainSeparator() were read on chain and
-# match these constants (see tests).
-COW_SETTLEMENT_ADDRESS = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
-COW_VAULT_RELAYER_ADDRESS = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"
-COW_APP_DATA = "{}"
-COW_ORDER_VALIDITY_SECONDS = 600
-COW_POLL_SECONDS = 5
-COW_ORDER_TYPEHASH = Web3.keccak(text=(
-    "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,uint256 buyAmount,"
-    "uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,bool partiallyFillable,"
-    "string sellTokenBalance,string buyTokenBalance)"))
-COW_DOMAIN_SEPARATOR = Web3.keccak(abi_encode(
-    ["bytes32", "bytes32", "bytes32", "uint256", "address"],
-    [Web3.keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-     Web3.keccak(text="Gnosis Protocol"), Web3.keccak(text="v2"), 8453, COW_SETTLEMENT_ADDRESS]))
-
-WETH_DEPOSIT_ABI = [{"inputs": [], "name": "deposit", "outputs": [], "stateMutability": "payable", "type": "function"}]
-
-
-def cow_order_digest(order):
-    """EIP-712 digest of a GPv2 order, as GPv2Settlement verifies it."""
-    struct = abi_encode(
-        ["bytes32", "address", "address", "address", "uint256", "uint256", "uint32", "bytes32", "uint256",
-         "bytes32", "bool", "bytes32", "bytes32"],
-        [COW_ORDER_TYPEHASH, order["sellToken"], order["buyToken"], order["receiver"], order["sellAmount"],
-         order["buyAmount"], order["validTo"], bytes.fromhex(order["appData"][2:]), order["feeAmount"],
-         Web3.keccak(text=order["kind"]), order["partiallyFillable"], Web3.keccak(text=order["sellTokenBalance"]),
-         Web3.keccak(text=order["buyTokenBalance"])])
-    return Web3.keccak(b"\x19\x01" + COW_DOMAIN_SEPARATOR + Web3.keccak(struct))
-
-# Base Token Registry. With ONCHAIN_ROUTER=zerox this is also the allowlist of tradable tokens.
-TOKENS = {
-    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   # Native USDC
-    "USDC.e": "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca", # Bridged USDC
-    "WETH": "0x4200000000000000000000000000000000000006",
-    "BTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",    # cbBTC
-    "AERO": "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
-    "LINK": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",    # Chainlink
-    "MORPHO": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842", # Morpho DeFi token
-    "ZRO": "0x6985884c4392d348587b19cb9eaaf157f13271cd",    # LayerZero token
-    "VVV": "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",    # Venice token
-    "AAVE": "0x63706e401c06ac8513145b7687A14804d17f814b",
-    "UNI": "0xc3De830EA07524a0761646a6a4e4be0e114a3C83",
-}
-
-# Dropped from TOKENS but possibly still held: symbol -> (address, dust threshold in raw units).
-LEGACY_TOKENS = {
-    "WBTC": ("0x0555E30da8f98308EdB960aa94C0Db47230d2B9c", 1000),
-}
-
-# Tokens to check during balance scan (minimal set to avoid rate limits)
-BALANCE_SCAN_TOKENS = ["USDC", "WETH"]
-
-
-def _env_flag(name):
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
-SLIPPAGE_BPS = int(os.environ.get("ONCHAIN_SLIPPAGE_BPS", "50"))
 MAX_SLIPPAGE_BPS = 300
 MIN_GAS_ETH = float(os.environ.get("MIN_GAS_ETH", "0.001"))
-TX_DEADLINE_SECONDS = int(os.environ.get("ONCHAIN_TX_DEADLINE_SECONDS", "120"))
-# Waiting past the deadline means an unmined swap can no longer fill, so a timeout is final.
-RECEIPT_TIMEOUT_SECONDS = TX_DEADLINE_SECONDS + 60
 GAS_LIMIT_BUFFER_PCT = 125
 MAX_SWAP_USD = Decimal(os.environ.get("ONCHAIN_MAX_SWAP_USD", "100"))
 MAX_PRICE_DEVIATION_PCT = Decimal(os.environ.get("ONCHAIN_MAX_PRICE_DEVIATION_PCT", "2"))
@@ -195,121 +87,14 @@ MAX_PRIORITY_FEE_WEI = Web3.to_wei(Decimal(os.environ.get("ONCHAIN_MAX_PRIORITY_
 ONCHAIN_ROUTER = os.environ.get("ONCHAIN_ROUTER", "aerodrome").strip().lower()
 ONCHAIN_ROUTERS = ("aerodrome", "zerox", "kyberswap", "cow")
 ONCHAIN_ROUND_TRIP_FEE_PCT = Decimal(os.environ.get("ONCHAIN_ROUND_TRIP_FEE_PCT", "0.006"))
-ZEROX_MAX_QUOTE_AGE_BLOCKS = int(os.environ.get("ZEROX_MAX_QUOTE_AGE_BLOCKS", "3"))
 PRICE_PROBE_USDC = 10
-ONCHAIN_KILL_SWITCH_FILE = os.environ.get(
-    "ONCHAIN_KILL_SWITCH_FILE",
-    os.path.join(
-        os.environ.get("XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")),
-        "trading-bot", "onchain_kill_switch",
-    ),
-)
-
-# Known token decimals (avoids RPC calls)
-KNOWN_DECIMALS = {
-    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": 6,    # USDC
-    "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": 6,    # USDC.e
-    "0x4200000000000000000000000000000000000006": 18,   # WETH
-    "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf": 8,    # cbBTC
-    "0x940181a94A35A4569E4529A3CDfB74e38FD98631": 18,   # AERO
-    "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196": 18,   # LINK
-    "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842": 18,   # MORPHO
-    "0x6985884c4392d348587b19cb9eaaf157f13271cd": 18,   # ZRO
-    "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf": 18,   # VVV
-    "0x63706e401c06ac8513145b7687A14804d17f814b": 18,   # AAVE
-    "0xc3De830EA07524a0761646a6a4e4be0e114a3C83": 18,   # UNI
-}
-
-# Public endpoints: used only for balance reads, never for quotes or writes.
-FALLBACK_RPCS = [
-    "https://mainnet.base.org",
-    "https://base.blockpi.network/v1/rpc/public",
-    "https://1rpc.io/base",
-    "https://base.meowrpc.com",
-]
-
-
-class KillSwitchEngaged(RuntimeError):
-    pass
-
-
-class ZeroExQuoteRejected(ZeroExError):
-    pass
-
-
-def onchain_kill_switch_engaged():
-    return _env_flag("ONCHAIN_KILL_SWITCH") or os.path.exists(ONCHAIN_KILL_SWITCH_FILE)
-
-
-def engage_onchain_kill_switch(reason):
-    """Create the kill-switch file. Never raises: it runs after swaps have already confirmed."""
-    try:
-        directory = os.path.dirname(ONCHAIN_KILL_SWITCH_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(ONCHAIN_KILL_SWITCH_FILE, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {reason}\n")
-    except OSError as e:
-        logging.critical(f"Could not write kill switch {ONCHAIN_KILL_SWITCH_FILE} ({e}); set ONCHAIN_KILL_SWITCH=true. Reason: {reason}")
-
-
-def _same_address(a, b):
-    return isinstance(a, str) and isinstance(b, str) and a.lower() == b.lower()
-
-
-def _receipt_fee_wei(receipt):
-    """L2 execution fee plus Base's L1 data fee (l1Fee, hex or int) from a receipt; 0 if unknown."""
-    if not receipt:
-        return 0
-    l1_fee = receipt.get("l1Fee") or 0
-    l1_fee = int(l1_fee, 16) if isinstance(l1_fee, str) else int(l1_fee)
-    return int(receipt.get("gasUsed") or 0) * int(receipt.get("effectiveGasPrice") or 0) + l1_fee
-
-
-class _RawContractCall:
-    """The estimate_gas/build_transaction surface _send_contract_tx expects, for API-built calldata."""
-    def __init__(self, w3, to, data, api_gas=None):
-        self._w3 = w3
-        self.to = Web3.to_checksum_address(to)
-        self.data = data
-        self.api_gas = api_gas
-
-    def estimate_gas(self, params):
-        gas = self._w3.eth.estimate_gas({**params, "to": self.to, "data": self.data})
-        if self.api_gas and gas > self.api_gas:
-            logging.warning(f"Our gas estimate {gas} exceeds the API estimate {self.api_gas}")
-        return gas
-
-    def build_transaction(self, params):
-        return {**params, "to": self.to, "data": self.data}
-
-
-def retry_rpc_call(func, max_retries=4, base_delay=2.0):
-    """Execute an RPC call with exponential backoff retry on 429/rate limit errors."""
-    last_exception = None
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as e:
-            last_exception = e
-            error_str = str(e)
-            is_rate_limit = "429" in error_str or "Too Many Requests" in error_str
-            is_timeout = "timeout" in error_str.lower() or "timed out" in error_str.lower()
-
-            if attempt < max_retries - 1 and (is_rate_limit or is_timeout):
-                delay = base_delay * (2 ** attempt)
-                logging.warning(f"RPC call failed (attempt {attempt + 1}/{max_retries}), retrying in {delay:.1f}s: {redact(error_str)[:100]}")
-                time.sleep(delay)
-            else:
-                raise
-    raise last_exception
 
 
 def _make_web3(url):
     return Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 30}))
 
 
-class EthereumExecutor:
+class EthereumExecutor(AerodromeMixin, ZeroExMixin, KyberSwapMixin, CowMixin):
     """Swaps ERC-20s on Base via the Aerodrome Router or the 0x Swap API (ONCHAIN_ROUTER)."""
     def __init__(self, rpc_url, private_key, trading_mode="paper", trusted_rpc_url=None):
         if ONCHAIN_ROUTER not in ONCHAIN_ROUTERS:
@@ -727,42 +512,6 @@ class EthereumExecutor:
             logging.error(f"Approve failed: {e}")
             return None
 
-    def _candidate_routes(self, token_in, token_out):
-        factory = Web3.to_checksum_address(AERODROME_POOL_FACTORY_ADDRESS)
-        a = Web3.to_checksum_address(token_in)
-        b = Web3.to_checksum_address(token_out)
-        weth = Web3.to_checksum_address(TOKENS["WETH"])
-        candidates = [[(a, b, stable, factory)] for stable in (False, True)]
-        if weth not in (a, b):
-            candidates += [
-                [(a, weth, stable_in, factory), (weth, b, stable_out, factory)]
-                for stable_in in (False, True)
-                for stable_out in (False, True)
-            ]
-        return candidates
-
-    def get_quote(self, token_in, token_out, amount_in):
-        """Best Aerodrome route by Router.getAmountsOut on the trusted RPC.
-
-        Returns (routes, expected_amount_out) or None. Non-existent pools quote 0 on Aerodrome,
-        so zero outputs are discarded rather than treated as a price.
-        """
-        best = None
-        for routes in self._candidate_routes(token_in, token_out):
-            try:
-                amounts = retry_rpc_call(
-                    lambda: self.router_contract.functions.getAmountsOut(amount_in, routes).call()
-                )
-            except Exception as e:
-                logging.debug(f"getAmountsOut failed for {routes}: {e}")
-                continue
-            amount_out = amounts[-1]
-            if amount_out > 0 and (best is None or amount_out > best[1]):
-                best = (routes, amount_out)
-        if best is None:
-            logging.warning(f"No Aerodrome quote for {amount_in} of {token_in} -> {token_out}")
-        return best
-
     def _amount_out_minimum(self, expected_out, slippage_bps=None):
         bps = SLIPPAGE_BPS if slippage_bps is None else slippage_bps
         if not 0 < bps <= MAX_SLIPPAGE_BPS:
@@ -863,107 +612,6 @@ class EthereumExecutor:
         logging.error("Account has an unconfirmed transaction in flight; refusing to stack another swap")
         return {"success": False, "error": "unconfirmed transaction in flight"}
 
-    def _execute_aerodrome_swap(self, token_in, token_out, amount_in, recipient, reference_price):
-        try:
-            refusal = self._preflight(token_in, amount_in)
-            if refusal:
-                return refusal
-
-            # Held from the in-flight check through broadcast so concurrent swaps cannot both pass it.
-            with self._nonce_lock:
-                if self._has_unconfirmed_tx():
-                    return self._in_flight_refusal()
-
-                quote = self.get_quote(token_in, token_out, amount_in)
-                if quote is None:
-                    return {"success": False, "error": "no quote available; refusing to swap without slippage protection"}
-
-                approval_result = self._approve_token(token_in, amount_in)
-                if approval_result is None:
-                    logging.error(f"Token approval failed for {token_in}, cannot execute swap")
-                    return {"success": False, "error": "approval failed"}
-                if approval_result is not True:
-                    quote = self.get_quote(token_in, token_out, amount_in)
-                    if quote is None:
-                        return {"success": False, "error": "no quote available after approval"}
-
-                routes, expected_out = quote
-                if reference_price is not None:
-                    refusal = self._reference_price_refusal(token_in, token_out, amount_in, expected_out, reference_price, "Aerodrome")
-                    if refusal:
-                        return {"success": False, "error": refusal}
-
-                amount_out_min = self._amount_out_minimum(expected_out)
-                if amount_out_min <= 0:
-                    return {"success": False, "error": "amountOutMinimum rounds to zero; refusing swap"}
-
-                deadline = self._latest_block()["timestamp"] + TX_DEADLINE_SECONDS
-                logging.info(
-                    f"Aerodrome swap: in={amount_in} expected={expected_out} min={amount_out_min} "
-                    f"({SLIPPAGE_BPS}bps) hops={len(routes)} deadline={deadline}"
-                )
-                swap_fn = self.router_contract.functions.swapExactTokensForTokens(
-                    amount_in, amount_out_min, routes, Web3.to_checksum_address(recipient), deadline
-                )
-                tx_hash = self._send_contract_tx(swap_fn)
-        except Exception as e:
-            logging.error(f"Swap not broadcast: {e}")
-            return {"success": False, "error": str(e)}
-
-        return self._await_swap(tx_hash, amount_in, amount_out_min)[0]
-
-    def _execute_zerox_swap(self, token_in, token_out, amount_in, recipient, reference_price):
-        """Exact-input swap with 0x AllowanceHolder calldata, signed and sent by us.
-
-        Refuses unless the signed /quote targets the pinned AllowanceHolder, exec()s into the
-        registry's current (or, during dwell, previous) Settler for our sell token and amount,
-        sends no ETH, sets minBuyAmount at or above our slippage floor, was sampled within
-        ZEROX_MAX_QUOTE_AGE_BLOCKS, and fills within MAX_PRICE_DEVIATION_PCT of reference_price.
-        Failures attributable to 0x carry "zerox_unavailable" so execute_swap can fall back.
-        """
-        if not _same_address(recipient, self.account.address):
-            return {"success": False, "error": "0x swaps must pay our own wallet"}
-        if reference_price is None or Decimal(str(reference_price)) <= 0:
-            logging.error(f"No usable reference price ({reference_price}); refusing unguarded 0x swap")
-            return {"success": False, "error": "no reference price; refusing unguarded swap"}
-        try:
-            refusal = self._preflight(token_in, amount_in)
-            if refusal:
-                return refusal
-
-            with self._nonce_lock:
-                if self._has_unconfirmed_tx():
-                    return self._in_flight_refusal()
-
-                indicative = self._zerox_request("price", token_in, token_out, amount_in)
-                self._check_zerox_response(indicative, token_in, token_out, amount_in, reference_price, firm=False)
-
-                if self._approve_token(token_in, amount_in, spender=ALLOWANCE_HOLDER_ADDRESS) is None:
-                    logging.error(f"Token approval failed for {token_in}, cannot execute swap")
-                    return {"success": False, "error": "approval failed"}
-
-                quote = self._zerox_request("quote", token_in, token_out, amount_in)
-                our_min = self._check_zerox_response(quote, token_in, token_out, amount_in, reference_price, firm=True)
-                swap_call = self._check_zerox_transaction(quote, token_in, token_out, amount_in, our_min)
-                self._check_zerox_freshness(quote)
-                logging.info(
-                    f"0x swap: in={amount_in} buy={quote['buyAmount']} minBuy={quote['minBuyAmount']} "
-                    f"ourMin={our_min} zeroExFee={(quote.get('fees') or {}).get('zeroExFee')} "
-                    f"route={[f.get('source') for f in (quote.get('route') or {}).get('fills', [])]} zid={quote.get('zid')}"
-                )
-                tx_hash = self._send_contract_tx(swap_call)
-        except ZeroExError as e:
-            logging.error(f"0x route refused; nothing signed: {e}")
-            return {"success": False, "error": f"0x: {e}", "zerox_unavailable": True}
-        except Exception as e:
-            logging.error(f"Swap not broadcast: {e}")
-            return {"success": False, "error": str(e)}
-
-        result, receipt = self._await_swap(tx_hash, amount_in, our_min)
-        if result.get("confirmed"):
-            self._verify_fill(token_out, receipt, our_min, result["tx_hash"])
-        return result
-
     def _api_swap_refusal(self, recipient, reference_price, venue):
         if not _same_address(recipient, self.account.address):
             return {"success": False, "error": f"{venue} swaps must pay our own wallet"}
@@ -975,188 +623,6 @@ class EthereumExecutor:
     def _require_code(self, address):
         if not retry_rpc_call(lambda: self.trusted_w3.eth.get_code(Web3.to_checksum_address(address))):
             raise RuntimeError(f"{address} has no code on the trusted RPC's chain")
-
-    def _execute_kyberswap_swap(self, token_in, token_out, amount_in, recipient, reference_price):
-        """Exact-input swap with KyberSwap router calldata, validated before signing (see
-        _check_kyber_build) and refused when the quote is far from reference_price."""
-        refusal = self._api_swap_refusal(recipient, reference_price, "KyberSwap")
-        if refusal:
-            return refusal
-        try:
-            refusal = self._preflight(token_in, amount_in)
-            if refusal:
-                return refusal
-
-            with self._nonce_lock:
-                if self._has_unconfirmed_tx():
-                    return self._in_flight_refusal()
-
-                route = self.kyber.routes(token_in, token_out, amount_in)
-                refusal = self._reference_price_refusal(
-                    token_in, token_out, amount_in, int(route["amountOut"]), reference_price, "KyberSwap")
-                if refusal:
-                    return {"success": False, "error": refusal}
-
-                if self._approve_token(token_in, amount_in, spender=KYBER_ROUTER_ADDRESS) is None:
-                    logging.error(f"Token approval failed for {token_in}, cannot execute swap")
-                    return {"success": False, "error": "approval failed"}
-
-                built = self.kyber.build(route, self.account.address, self.account.address, SLIPPAGE_BPS)
-                quoted_out = int(built["amountOut"])
-                refusal = self._reference_price_refusal(
-                    token_in, token_out, amount_in, quoted_out, reference_price, "KyberSwap")
-                if refusal:
-                    return {"success": False, "error": refusal}
-                our_min = self._amount_out_minimum(quoted_out)
-                self._check_kyber_build(built, token_in, token_out, amount_in, our_min)
-                self._require_code(KYBER_ROUTER_ADDRESS)
-                logging.info(f"KyberSwap swap: in={amount_in} quoted={quoted_out} ourMin={our_min} gas={built.get('gas')}")
-                tx_hash = self._send_contract_tx(_RawContractCall(
-                    self.trusted_w3, KYBER_ROUTER_ADDRESS, built["data"], int(built.get("gas") or 0) or None))
-        except KyberSwapError as e:
-            logging.error(f"KyberSwap route refused; nothing signed: {e}")
-            return {"success": False, "error": f"KyberSwap: {e}"}
-        except Exception as e:
-            logging.error(f"Swap not broadcast: {e}")
-            return {"success": False, "error": str(e)}
-
-        result, receipt = self._await_swap(tx_hash, amount_in, our_min)
-        result.update(quoted_out=quoted_out, min_out=our_min, gas_wei=_receipt_fee_wei(receipt))
-        if result.get("confirmed"):
-            result["received"] = self._verify_fill(token_out, receipt, our_min, result["tx_hash"])
-        return result
-
-    def _check_kyber_build(self, built, token_in, token_out, amount_in, our_min):
-        """Require the pinned router's swap() with our tokens, amount and receiver, no fee receivers
-        or permit, no ETH value, and minReturnAmount at or above our floor."""
-        try:
-            router, value, data = built["routerAddress"], int(built.get("transactionValue") or 0), built["data"]
-        except (KeyError, TypeError, ValueError) as e:
-            raise KyberSwapError(f"malformed build response: {e!r}") from None
-        if not _same_address(router, KYBER_ROUTER_ADDRESS):
-            raise KyberSwapError(f"routerAddress {router} is not the pinned router")
-        if value != 0:
-            raise KyberSwapError(f"transactionValue {value} must be 0 for an ERC-20 sell")
-        if not data.lower().startswith(KYBER_SWAP_SELECTOR):
-            raise KyberSwapError("calldata is not MetaAggregationRouterV2.swap")
-        try:
-            (_, _, _, desc, _), = abi_decode(KYBER_SWAP_TYPES, bytes.fromhex(data[10:]))
-            src, dst, _, src_amounts, fee_receivers, fee_amounts, receiver, amount, min_return, _, permit = desc
-        except (DecodingError, ValueError, TypeError) as e:
-            raise KyberSwapError(f"malformed calldata: {e!r}") from None
-        if not (_same_address(src, token_in) and _same_address(dst, token_out) and amount == amount_in):
-            raise KyberSwapError(f"desc {src}->{dst} amount {amount} does not match our order")
-        if sum(src_amounts) > amount_in:
-            raise KyberSwapError(f"srcAmounts {src_amounts} exceed our amount {amount_in}")
-        if fee_receivers or any(fee_amounts):
-            raise KyberSwapError(f"fee receivers present: {fee_receivers} {fee_amounts}")
-        if permit:
-            raise KyberSwapError("permit present; we approve explicitly")
-        if not _same_address(receiver, self.account.address):
-            raise KyberSwapError(f"dstReceiver {receiver} is not our wallet")
-        if min_return < our_min:
-            raise KyberSwapError(f"minReturnAmount {min_return} below our floor {our_min}")
-
-    def _execute_cow_swap(self, token_in, token_out, amount_in, recipient, reference_price):
-        """Sell order on CoW Protocol. We sign our own fill-or-kill GPv2 order (receiver us, limit =
-        quote less SLIPPAGE_BPS, valid COW_ORDER_VALIDITY_SECONDS), so no third-party calldata is
-        signed. Waits for it to settle; an expired order moved no funds and its allowance is reset."""
-        refusal = self._api_swap_refusal(recipient, reference_price, "CoW")
-        if refusal:
-            return refusal
-        try:
-            refusal = self._preflight(token_in, amount_in)
-            if refusal:
-                return refusal
-
-            with self._nonce_lock:
-                if self._has_unconfirmed_tx():
-                    return self._in_flight_refusal()
-                quote_id, quoted_out = self._cow_quote(token_in, token_out, amount_in)
-                refusal = self._reference_price_refusal(
-                    token_in, token_out, amount_in, quoted_out, reference_price, "CoW")
-                if refusal:
-                    return {"success": False, "error": refusal}
-                our_min = self._amount_out_minimum(quoted_out)
-                if self._approve_token(token_in, amount_in, spender=COW_VAULT_RELAYER_ADDRESS) is None:
-                    logging.error(f"Token approval failed for {token_in}, cannot place order")
-                    return {"success": False, "error": "approval failed"}
-
-            before = self._token_balance(token_out, "latest")
-            order = self._cow_order(token_in, token_out, amount_in, our_min,
-                                    self._latest_block()["timestamp"] + COW_ORDER_VALIDITY_SECONDS)
-            if onchain_kill_switch_engaged():
-                raise KillSwitchEngaged("kill switch engaged")
-            signature = self._sign_cow_order(order)
-            uid = self.cow.post_order({
-                **{k: str(v) if k in ("sellAmount", "buyAmount", "feeAmount") else v for k, v in order.items()},
-                "appData": COW_APP_DATA, "appDataHash": order["appData"], "signingScheme": "eip712",
-                "signature": signature, "from": self.account.address, "quoteId": quote_id})
-            logging.info(f"CoW order {uid}: sell={amount_in} quoted={quoted_out} limit={our_min} validTo={order['validTo']}")
-        except CowError as e:
-            logging.error(f"CoW order refused; nothing placed: {e}")
-            return {"success": False, "error": f"CoW: {e}"}
-        except Exception as e:
-            logging.error(f"CoW order not placed: {e}")
-            return {"success": False, "error": str(e)}
-
-        base = {"order_uid": uid, "quoted_out": quoted_out, "min_out": our_min, "gas_wei": 0}
-        status = self._await_cow_order(uid)
-        if status in ("expired", "cancelled"):
-            self._reset_allowance(token_in, COW_VAULT_RELAYER_ADDRESS)
-            return {**base, "success": False, "error": f"CoW order {status}; nothing filled"}
-        if status != "fulfilled":
-            logging.error(f"CoW order {uid} unresolved ({status}); NOT resubmitting")
-            return {**base, "success": False, "pending": True, "error": f"CoW order {status}; do not resubmit"}
-
-        trade = (self.cow.trades(uid) or [{}])[0]
-        received = self._token_balance(token_out, trade.get("blockNumber") or "latest") - before
-        self._check_received(token_out, received, our_min, uid)
-        return {**base, "success": True, "confirmed": True, "tx_hash": trade.get("txHash"), "received": received}
-
-    def _cow_quote(self, token_in, token_out, amount_in):
-        """Returns (quote id, buyAmount net of network costs) after checking the quote echoes our order."""
-        response = self.cow.quote({
-            "sellToken": token_in, "buyToken": token_out, "from": self.account.address,
-            "receiver": self.account.address, "kind": "sell", "sellAmountBeforeFee": str(amount_in),
-            "appData": COW_APP_DATA, "signingScheme": "eip712", "priceQuality": "optimal"})
-        try:
-            quote = response["quote"]
-            echoes = (_same_address(quote["sellToken"], token_in) and _same_address(quote["buyToken"], token_out)
-                      and _same_address(quote["receiver"], self.account.address) and quote["kind"] == "sell"
-                      and quote["partiallyFillable"] is False
-                      and int(quote["sellAmount"]) + int(quote["feeAmount"]) == amount_in)
-            quoted_out = int(quote["buyAmount"])
-            quote_id = response["id"]
-        except (KeyError, TypeError, ValueError) as e:
-            raise CowError(f"malformed quote: {e!r}") from None
-        if not echoes or quoted_out <= 0:
-            raise CowError(f"quote does not match our order: {quote}")
-        return quote_id, quoted_out
-
-    def _cow_order(self, token_in, token_out, amount_in, buy_amount, valid_to):
-        return {"sellToken": Web3.to_checksum_address(token_in), "buyToken": Web3.to_checksum_address(token_out),
-                "receiver": self.account.address, "sellAmount": amount_in, "buyAmount": buy_amount,
-                "validTo": valid_to, "appData": "0x" + Web3.keccak(text=COW_APP_DATA).hex().removeprefix("0x"),
-                "feeAmount": 0, "kind": "sell", "partiallyFillable": False,
-                "sellTokenBalance": "erc20", "buyTokenBalance": "erc20"}
-
-    def _sign_cow_order(self, order):
-        signed = self.account.unsafe_sign_hash(cow_order_digest(order))
-        return "0x" + signed.signature.hex().removeprefix("0x")
-
-    def _await_cow_order(self, uid):
-        """Poll until the order is fulfilled, expired or cancelled; returns the last status seen."""
-        status = None
-        for _ in range((COW_ORDER_VALIDITY_SECONDS + 120) // COW_POLL_SECONDS):
-            try:
-                status = self.cow.order(uid).get("status")
-            except CowError as e:
-                logging.warning(f"CoW order {uid} status unavailable: {e}")
-            if status in ("fulfilled", "expired", "cancelled"):
-                return status
-            time.sleep(COW_POLL_SECONDS)
-        return status
 
     def _reset_allowance(self, token, spender):
         try:
@@ -1190,120 +656,6 @@ class EthereumExecutor:
         return {"success": status == "confirmed", "status": status, "tx_hash": tx_hash.hex(),
                 "gas_wei": _receipt_fee_wei(receipt)}
 
-    def _zerox_request(self, kind, token_in, token_out, amount_in):
-        if self.zerox is None:
-            raise ZeroExError("ZEROX_API_KEY is not set")
-        params = {
-            "chainId": EXPECTED_CHAIN_ID,
-            "sellToken": token_in,
-            "buyToken": token_out,
-            "sellAmount": str(amount_in),
-            "taker": self.account.address,
-            "recipient": self.account.address,
-            "slippagePpm": SLIPPAGE_BPS * 100,
-        }
-        return getattr(self.zerox, kind)(params)
-
-    def _check_zerox_response(self, response, token_in, token_out, amount_in, reference_price, firm):
-        """Validate a /price (firm=False) or /quote (firm=True) body. Returns our minimum output."""
-        try:
-            issues = response["issues"]
-            if response.get("liquidityAvailable") is not True:
-                raise ZeroExQuoteRejected("no liquidity available")
-            if issues.get("balance") is not None:
-                raise ZeroExQuoteRejected(f"insufficient sell-token balance: {issues['balance']}")
-            allowance_issue = issues.get("allowance")
-            if allowance_issue is not None and not _same_address(allowance_issue.get("spender"), ALLOWANCE_HOLDER_ADDRESS):
-                raise ZeroExQuoteRejected(f"allowance spender {allowance_issue.get('spender')} is not AllowanceHolder")
-            if not _same_address(response.get("allowanceTarget"), ALLOWANCE_HOLDER_ADDRESS):
-                raise ZeroExQuoteRejected(f"allowanceTarget {response.get('allowanceTarget')} is not AllowanceHolder")
-            if not (_same_address(response.get("sellToken"), token_in) and _same_address(response.get("buyToken"), token_out)
-                    and int(response["sellAmount"]) == amount_in):
-                raise ZeroExQuoteRejected("response does not match the requested order")
-            buy_amount, min_buy = int(response["buyAmount"]), int(response["minBuyAmount"])
-        except (KeyError, TypeError, ValueError, AttributeError) as e:
-            raise ZeroExQuoteRejected(f"malformed 0x response: {e!r}") from None
-        if buy_amount <= 0 or min_buy <= 0:
-            raise ZeroExQuoteRejected(f"non-positive buyAmount {buy_amount} / minBuyAmount {min_buy}")
-        refusal = self._reference_price_refusal(token_in, token_out, amount_in, buy_amount, reference_price, "0x")
-        if refusal:
-            raise ZeroExQuoteRejected(refusal)
-        our_min = self._amount_out_minimum(buy_amount)
-        if firm:
-            if issues.get("simulationIncomplete") is not False:
-                raise ZeroExQuoteRejected("0x could not simulate the swap")
-            if issues.get("invalidSourcesPassed"):
-                raise ZeroExQuoteRejected(f"invalid sources: {issues['invalidSourcesPassed']}")
-            if our_min <= 0 or min_buy < our_min:
-                raise ZeroExQuoteRejected(f"minBuyAmount {min_buy} below our floor {our_min}")
-        return our_min
-
-    def _check_zerox_transaction(self, quote, token_in, token_out, amount_in, our_min):
-        """Validate quote.transaction, including the Settler call it forwards, and return it as a
-        call for _send_contract_tx."""
-        try:
-            tx = quote["transaction"]
-            to, value, data = tx["to"], int(tx["value"]), tx["data"]
-            api_gas = int(tx["gas"]) if tx.get("gas") else None
-            if not data.lower().startswith(ALLOWANCE_HOLDER_EXEC_SELECTOR):
-                raise ZeroExQuoteRejected("transaction.data is not AllowanceHolder.exec")
-            operator, token, amount, target, settler_call = abi_decode(
-                ["address", "address", "uint256", "address", "bytes"], bytes.fromhex(data[10:]))
-            if "0x" + settler_call[:4].hex() != SETTLER_EXECUTE_SELECTOR:
-                raise ZeroExQuoteRejected("exec() data is not Settler.execute")
-            (recipient, buy_token, min_amount_out), _, _ = abi_decode(
-                ["(address,address,uint256)", "bytes[]", "bytes32"], settler_call[4:])
-        except (KeyError, TypeError, ValueError, AttributeError, DecodingError) as e:
-            raise ZeroExQuoteRejected(f"malformed 0x transaction: {e!r}") from None
-        if not _same_address(recipient, self.account.address):
-            raise ZeroExQuoteRejected(f"Settler slippage recipient {recipient} is not our wallet")
-        if not _same_address(buy_token, token_out):
-            raise ZeroExQuoteRejected(f"Settler slippage buyToken {buy_token} is not {token_out}")
-        if min_amount_out < our_min:
-            raise ZeroExQuoteRejected(f"Settler slippage minAmountOut {min_amount_out} below our floor {our_min}")
-        if not _same_address(to, ALLOWANCE_HOLDER_ADDRESS):
-            raise ZeroExQuoteRejected(f"transaction.to {to} is not AllowanceHolder")
-        if value != 0:
-            raise ZeroExQuoteRejected(f"transaction.value {value} must be 0 for an ERC-20 sell")
-        if not _same_address(token, token_in) or amount > amount_in:
-            raise ZeroExQuoteRejected(f"exec() token/amount {token}/{amount} does not match our {token_in}/{amount_in}")
-        if not _same_address(operator, target):
-            raise ZeroExQuoteRejected(f"exec() operator {operator} differs from target {target}")
-        self._require_allowance_holder_code()
-        self._require_genuine_settler(target)
-        return _RawContractCall(self.trusted_w3, ALLOWANCE_HOLDER_ADDRESS, data, api_gas)
-
-    def _require_allowance_holder_code(self):
-        if self._allowance_holder_verified:
-            return
-        code = retry_rpc_call(lambda: self.trusted_w3.eth.get_code(Web3.to_checksum_address(ALLOWANCE_HOLDER_ADDRESS)))
-        if not code:
-            raise ZeroExQuoteRejected("AllowanceHolder has no code on the trusted RPC's chain")
-        self._allowance_holder_verified = True
-
-    def _require_genuine_settler(self, target):
-        registry = self.trusted_w3.eth.contract(
-            address=Web3.to_checksum_address(SETTLER_REGISTRY_ADDRESS), abi=SETTLER_REGISTRY_ABI)
-        feature = SETTLER_TAKER_SUBMITTED_FEATURE
-        try:
-            current = retry_rpc_call(lambda: registry.functions.ownerOf(feature).call())
-        except Exception as e:
-            raise ZeroExQuoteRejected(f"Settler paused or registry unreadable (ownerOf({feature}): {e})") from None
-        if _same_address(current, target):
-            return
-        try:
-            previous = retry_rpc_call(lambda: registry.functions.prev(feature).call())
-        except Exception as e:
-            raise ZeroExQuoteRejected(f"exec() target {target} is not Settler {current}; prev({feature}) failed: {e}") from None
-        if not _same_address(previous, target):
-            raise ZeroExQuoteRejected(f"exec() target {target} is neither Settler {current} nor previous {previous}")
-        logging.info(f"0x targets the previous Settler {target} (registry dwell period)")
-
-    def _check_zerox_freshness(self, quote):
-        age = self._latest_block()["number"] - int(quote["blockNumber"])
-        if age > ZEROX_MAX_QUOTE_AGE_BLOCKS:
-            raise ZeroExQuoteRejected(f"quote sampled {age} blocks ago (max {ZEROX_MAX_QUOTE_AGE_BLOCKS})")
-
     def _token_balance(self, token, block_identifier):
         contract = self.trusted_w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         return retry_rpc_call(
@@ -1326,7 +678,7 @@ class EthereumExecutor:
         if received < our_min:
             logging.critical(
                 f"Swap {ref} delivered {received} of {token_out}, below our floor {our_min}; "
-                f"engaging on-chain kill switch ({ONCHAIN_KILL_SWITCH_FILE})"
+                f"engaging on-chain kill switch ({onchain_common.ONCHAIN_KILL_SWITCH_FILE})"
             )
             engage_onchain_kill_switch(f"fill shortfall ref={ref} received={received} floor={our_min}")
 

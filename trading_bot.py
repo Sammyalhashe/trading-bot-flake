@@ -331,23 +331,7 @@ def _notify_sell(ex_id, asset, exit_price, entry, sell_amount, reason, pnl):
     send_telegram_message(msg)
 
 
-# --- Strategy Logic (wrappers for backward compatibility) ---
-def analyze_trend(df):
-    """Wrapper for backward compatibility"""
-    return technical_analysis.analyze_trend(df)
-
-def compute_eth_btc_ratio(data_provider):
-    """Wrapper for backward compatibility"""
-    return regime_detector.compute_eth_btc_ratio(data_provider)
-
-def resolve_regime(btc_macro, rotation_signal, btc_dominance=None):
-    """Wrapper for backward compatibility"""
-    return regime_detector.resolve_regime(btc_macro, rotation_signal, btc_dominance)
-
-def regime_to_legacy(regime):
-    """Wrapper for backward compatibility"""
-    return regime_detector.regime_to_legacy(regime)
-
+# --- Strategy Logic ---
 REGIME_CONFIRM_COUNT = 3
 
 def apply_regime_hysteresis(full_regime):
@@ -380,10 +364,6 @@ def apply_regime_hysteresis(full_regime):
     save_state(state)
     return prev_regime
 
-def get_btc_dominance():
-    """Wrapper for backward compatibility"""
-    return regime_detector.get_btc_dominance()
-
 def calculate_rsi(df, period=14):
     """Wrapper for backward compatibility"""
     return technical_analysis.calculate_rsi(df, period)
@@ -395,10 +375,6 @@ def calculate_atr(df, period=14):
 def get_momentum_ranking(df):
     """Wrapper for backward compatibility"""
     return technical_analysis.get_momentum_ranking(df, MOMENTUM_WINDOW_HOURS)
-
-def is_crossover_confirmed(df, direction="bull"):
-    """Wrapper for backward compatibility"""
-    return technical_analysis.is_crossover_confirmed(df, direction)
 
 def _executor_round_trip_fee(executor):
     """The executor's own round-trip fee rate (e.g. on-chain), or None to use the global config."""
@@ -474,11 +450,16 @@ def _record_exit(executor, ex_id, asset, product_id, sell_amount, sell_ratio, ex
     return pnl
 
 
-def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False, derivatives_signals=None):
+def _executor_id(executor):
+    """State-key prefix for an executor; on-chain wallets are suffixed with their address."""
     ex_id = executor.__class__.__name__
     if hasattr(executor, 'account') and executor.account:
         ex_id = f"{ex_id}_{executor.account.address[:6]}"
+    return ex_id
 
+
+def _fetch_balances(executor, ex_id):
+    """Returns (cash_avail, held_avail, cash_total, held_total), including tokens only known from state."""
     # Pre-load state to discover tokens we hold in state but might not scan by default
     state = load_state()
     extra_tokens = []
@@ -508,10 +489,13 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         # Fallback for other executors (legacy simple dict)
         cash_avail = cash_total = bal["cash"].get("USDC", 0.0)
         held_avail = held_total = bal["crypto"]
+    return cash_avail, held_avail, cash_total, held_total
 
+
+def _reconcile_state(ex_id, held_total):
+    """Clear entry prices for assets this executor no longer holds; returns the fresh state."""
     state = load_state()
 
-    # Reconcile state: clean up entry_prices for assets we no longer hold
     stale_keys = []
     for key in list(state.get("entry_prices", {}).keys()):
         if not key.startswith(f"{ex_id}:"):
@@ -528,8 +512,11 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             logging.warning(f"[{ex_id}] Removing orphaned state entry '{key}' — asset no longer held (manual sell?)")
             clear_entry_price(ex_id, key[len(f"{ex_id}:"):])
         state = load_state()  # reload after cleanup
+    return state
 
-    # Calculate local value using TOTAL balances
+
+def _portfolio_value(ex_id, data_provider, cash_total, held_total):
+    """Value TOTAL balances at current prices; returns (ex_value, asset_prices). Unpriceable assets are excluded."""
     ex_value = cash_total
     asset_prices = {}
     for asset, amt in held_total.items():
@@ -539,46 +526,53 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             ex_value += amt * asset_prices[asset]
         else:
             logging.warning(f"[{ex_id}] Could not price {asset} (product_id={get_data_product_id(asset)}), excluding from portfolio value")
+    return ex_value, asset_prices
 
-    logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
 
-    # Guard against API failures reporting $0 portfolio (false 100% drawdown).
-    # If ex_value is near-zero but we expect holdings, skip drawdown check.
+def _portfolio_value_implausible(ex_id, ex_value):
+    """Guard against API failures reporting $0 portfolio (false 100% drawdown)."""
     peak = risk_manager._get_peak_value(ex_id)
     if peak > 0 and ex_value < peak * 0.10:
         logging.error(
             f"[{ex_id}] Portfolio value ${ex_value:,.2f} is <10% of peak ${peak:,.2f} — "
             f"likely API failure, skipping drawdown check this cycle"
         )
-        return ex_value
+        return True
+    return False
 
-    # Update peak value and check drawdown (per-executor)
+
+def _entries_allowed(ex_id, ex_value):
+    """Update peak/drawdown via the circuit breakers; False when they trip or the control channel paused trading."""
     trading_allowed, dd_reason = risk_manager.check_circuit_breakers(ex_value, ex_id)
     drawdown_pct = risk_manager.get_current_drawdown(ex_value, ex_id)
     if control.is_paused():
         trading_allowed = False
         logging.info(f"[{ex_id}] Trading paused via control channel — skipping new entries")
+    return trading_allowed
 
-    if reset_to_usdc:
-        for asset, amount in held_avail.items():
-            if asset in ["USD", "USDC"] or asset in GAS_RESERVE_ASSETS or is_asset_blacklisted(asset): continue
-            if isinstance(executor, EthereumExecutor):
-                # On-chain sells need an off-chain reference price so a thin pool can't fill far below market.
-                if asset not in asset_prices:
-                    logging.error(f"[{ex_id}] No reference price for {asset}; skipping on-chain reset sell")
-                    continue
-                executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount,
-                                            reference_price=asset_prices[asset])
-            else:
-                executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount)
-            clear_entry_price(ex_id, get_data_product_id(asset))
-        return ex_value
 
+def _liquidate_to_usdc(executor, ex_id, held_avail, asset_prices):
+    """Market-sell every tradeable holding and clear its entry price."""
+    for asset, amount in held_avail.items():
+        if asset in ["USD", "USDC"] or asset in GAS_RESERVE_ASSETS or is_asset_blacklisted(asset): continue
+        if isinstance(executor, EthereumExecutor):
+            # On-chain sells need an off-chain reference price so a thin pool can't fill far below market.
+            if asset not in asset_prices:
+                logging.error(f"[{ex_id}] No reference price for {asset}; skipping on-chain reset sell")
+                continue
+            executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount,
+                                        reference_price=asset_prices[asset])
+        else:
+            executor.place_market_order(get_data_product_id(asset), 'SELL', amount_base_currency=amount)
+        clear_entry_price(ex_id, get_data_product_id(asset))
+
+
+def _scan_entries(executor, ex_id, data_provider, market_regime, full_regime, held_total, derivatives_signals):
+    """Ranked entry candidates, capped at TOP_MOMENTUM_COUNT with already-held assets first."""
     # Skip new entries if strategy says so for this regime
     if strategy.should_skip_regime(market_regime, full_regime):
         logging.info(f"[{ex_id}] {full_regime} regime — {strategy.name} skipping new entries")
 
-    # Scan for buys
     asset_candidates = []
     # Get assets supported by this executor
     supported_assets = executor.get_supported_assets()
@@ -608,8 +602,47 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
 
     # sort by assets already held so we can potentially top-up held positions and not
     # add to the max concurrency count.
-    asset_candidates = sorted(asset_candidates[:TOP_MOMENTUM_COUNT], key=lambda x : held_total.get(x["asset"], 0) > 0, reverse=True)
+    return sorted(asset_candidates[:TOP_MOMENTUM_COUNT], key=lambda x : held_total.get(x["asset"], 0) > 0, reverse=True)
 
+
+def _size_buy(ex_id, data_provider, asset, product_id, price, market_regime, ex_value, current_positions,
+              max_positions, current_asset_value, available_usdc, derivatives_signals):
+    """Returns (buy_size, size_msg): ATR-adjusted risk sizing, then bear-regime and derivatives scaling."""
+    # Calculate ATR for volatility-adjusted position sizing
+    atr = None
+    if hasattr(data_provider, 'get_market_data'):
+        df = data_provider.get_market_data(product_id, 20)
+        if df is not None:
+            atr = technical_analysis.calculate_atr(df)
+
+    buy_size, size_msg = risk_manager.calculate_position_with_existing(
+        portfolio_value=ex_value,
+        price=price,
+        existing_positions=current_positions,
+        max_positions=max_positions,
+        current_asset_value=current_asset_value,
+        available_cash=available_usdc,
+        executor_value=ex_value,
+        atr=atr
+    )
+    # Scale down position in BEAR regime
+    if market_regime == "BEAR" and config.bear_position_scale < 1.0 and getattr(strategy, "uses_hourly_regime", True):
+        bear_cap = config.bear_position_scale * ex_value / max(1, max_positions)
+        buy_size = min(buy_size * config.bear_position_scale,
+                       max(0.0, bear_cap - current_asset_value))
+        if buy_size >= float(config.min_order_usd):
+            logging.info(f"[{ex_id}] Bear scaling: {asset} position reduced to {config.bear_position_scale:.0%}")
+    # Derivatives position modifier (funding rate + L/S ratio)
+    if derivatives_signals and derivatives_signals.position_modifier != 1.0:
+        deriv_mod = derivatives_signals.position_modifier
+        buy_size *= deriv_mod
+        logging.info(f"[{ex_id}] Derivatives modifier: {asset} position scaled by {deriv_mod:.2f}x")
+    return buy_size, size_msg
+
+
+def _place_entries(executor, ex_id, data_provider, asset_candidates, market_regime, full_regime, ex_value,
+                   cash_avail, held_total, trading_allowed, derivatives_signals):
+    """Buy candidates subject to cooldown, the concurrent-position cap and sizing; book confirmed fills."""
     # Concurrent position guard: count non-stablecoin holdings for this executor
     current_positions = sum(1 for a in held_total
                             if a not in ("USD", "USDC") and a not in GAS_RESERVE_ASSETS and held_total[a] > 0)
@@ -632,35 +665,9 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
             price = float(price_data['price'])
             current_asset_value = held_total.get(asset, 0) * price
 
-            # Calculate ATR for volatility-adjusted position sizing
-            atr = None
-            if hasattr(data_provider, 'get_market_data'):
-                df = data_provider.get_market_data(product_id, 20)
-                if df is not None:
-                    atr = technical_analysis.calculate_atr(df)
-
-            buy_size, size_msg = risk_manager.calculate_position_with_existing(
-                portfolio_value=ex_value,
-                price=price,
-                existing_positions=current_positions,
-                max_positions=max_positions,
-                current_asset_value=current_asset_value,
-                available_cash=available_usdc,
-                executor_value=ex_value,
-                atr=atr
-            )
-            # Scale down position in BEAR regime
-            if market_regime == "BEAR" and config.bear_position_scale < 1.0 and getattr(strategy, "uses_hourly_regime", True):
-                bear_cap = config.bear_position_scale * ex_value / max(1, max_positions)
-                buy_size = min(buy_size * config.bear_position_scale,
-                               max(0.0, bear_cap - current_asset_value))
-                if buy_size >= float(config.min_order_usd):
-                    logging.info(f"[{ex_id}] Bear scaling: {asset} position reduced to {config.bear_position_scale:.0%}")
-            # Derivatives position modifier (funding rate + L/S ratio)
-            if derivatives_signals and derivatives_signals.position_modifier != 1.0:
-                deriv_mod = derivatives_signals.position_modifier
-                buy_size *= deriv_mod
-                logging.info(f"[{ex_id}] Derivatives modifier: {asset} position scaled by {deriv_mod:.2f}x")
+            buy_size, size_msg = _size_buy(ex_id, data_provider, asset, product_id, price, market_regime, ex_value,
+                                           current_positions, max_positions, current_asset_value, available_usdc,
+                                           derivatives_signals)
             if buy_size < float(config.min_order_usd):
                 if size_msg != "Normal position sizing":
                     logging.info(f"[{ex_id}] Skipping {asset}: {size_msg}")
@@ -739,7 +746,32 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
         except Exception as e:
             logging.error(f"[{ex_id}] Error evaluating {asset} for buy: {e}")
 
-    # Manage Sells
+
+def _execute_exit(executor, ex_id, asset, product_id, amt, price, entry, hwm, sell_ratio, reason, full_regime):
+    """Sell sell_ratio of the position and book it. Returns True when the entry price was cleared."""
+    logging.info(f"[{ex_id}] 🚨 {reason}")
+    sell_amount = amt * sell_ratio
+    is_stop_loss = "stop" in reason.lower()
+    status, exit_price, actual_sell_fee = _place_exit_order(
+        executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss)
+    if status == "dust":
+        clear_entry_price(ex_id, product_id)
+        return True
+    if status != "filled":
+        return False
+    logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
+    _record_exit(executor, ex_id, asset, product_id, sell_amount, sell_ratio, exit_price,
+                 actual_sell_fee, entry, reason, full_regime, hwm)
+    if is_stop_loss:
+        record_stopout(ex_id, product_id)
+    if sell_ratio == 1.0:
+        clear_entry_price(ex_id, product_id)
+        return True
+    return False
+
+
+def _manage_exits(executor, ex_id, data_provider, held_avail, state, full_regime):
+    """Adopt unmanaged holdings, track high water marks, and run the strategy's exit checks."""
     for asset, amt in held_avail.items():
         if asset in ["USD", "USDC"] or asset in GAS_RESERVE_ASSETS: continue
         product_id = get_data_product_id(asset)
@@ -793,28 +825,34 @@ def run_executor_strategy(executor, data_provider, market_regime, full_regime="B
                 save_state(state)
 
             if sell_trigger:
-                logging.info(f"[{ex_id}] 🚨 {reason}")
-                sell_amount = amt * sell_ratio
-                is_stop_loss = "stop" in reason.lower()
-                status, exit_price, actual_sell_fee = _place_exit_order(
-                    executor, ex_id, asset, product_id, price, sell_amount, is_stop_loss)
-                if status == "dust":
-                    clear_entry_price(ex_id, product_id)
-                    state = load_state()
-                    continue
-                if status != "filled":
-                    continue
-                logging.info(f"[{ex_id}] ✅ Sold {sell_amount:.6f} {asset} at ${exit_price:,.2f}")
-                _record_exit(executor, ex_id, asset, product_id, sell_amount, sell_ratio, exit_price,
-                             actual_sell_fee, entry, reason, full_regime, hwm)
-                if is_stop_loss:
-                    record_stopout(ex_id, product_id)
-                if sell_ratio == 1.0:
-                    clear_entry_price(ex_id, product_id)
+                if _execute_exit(executor, ex_id, asset, product_id, amt, price, entry, hwm,
+                                 sell_ratio, reason, full_regime):
                     state = load_state()
         except Exception as e:
             logging.error(f"[{ex_id}] Error managing sell for {asset}: {e}")
 
+
+def run_executor_strategy(executor, data_provider, market_regime, full_regime="BULL", reset_to_usdc=False, derivatives_signals=None):
+    ex_id = _executor_id(executor)
+    cash_avail, held_avail, cash_total, held_total = _fetch_balances(executor, ex_id)
+    state = _reconcile_state(ex_id, held_total)
+
+    ex_value, asset_prices = _portfolio_value(ex_id, data_provider, cash_total, held_total)
+    logging.info(f"[{ex_id}] Sub-Portfolio Value: ${ex_value:,.2f} | USDC: ${cash_avail:,.2f}")
+
+    if _portfolio_value_implausible(ex_id, ex_value):
+        return ex_value
+    trading_allowed = _entries_allowed(ex_id, ex_value)
+
+    if reset_to_usdc:
+        _liquidate_to_usdc(executor, ex_id, held_avail, asset_prices)
+        return ex_value
+
+    asset_candidates = _scan_entries(executor, ex_id, data_provider, market_regime, full_regime,
+                                     held_total, derivatives_signals)
+    _place_entries(executor, ex_id, data_provider, asset_candidates, market_regime, full_regime, ex_value,
+                   cash_avail, held_total, trading_allowed, derivatives_signals)
+    _manage_exits(executor, ex_id, data_provider, held_avail, state, full_regime)
     return ex_value
 
 PERIODIC_STATUS_INTERVAL = 4 * 3600  # 4 hours in seconds
@@ -844,7 +882,7 @@ def _build_status_message(full_regime, data_provider, aggregate_value, state, de
                 continue
             price = float(price_data['price'])
             df = data_provider.get_market_data(product_id, LONG_WINDOW)
-            ma_s, ma_l = analyze_trend(df)
+            ma_s, ma_l = technical_analysis.analyze_trend(df)
             rsi = calculate_rsi(df) if df is not None else None
             momentum = get_momentum_ranking(df) if df is not None else None
 
@@ -971,7 +1009,7 @@ def _run_bot(reset_to_usdc=False):
         # 1. BTC Macro Trend
         btc_product = get_data_product_id("BTC")
         btc_df = data_provider.get_market_data(btc_product, LONG_WINDOW)
-        btc_s, btc_l = analyze_trend(btc_df)
+        btc_s, btc_l = technical_analysis.analyze_trend(btc_df)
 
         if btc_s and btc_l:
             btc_price = btc_df['close'].iloc[-1] if len(btc_df) > 0 else None
@@ -988,7 +1026,7 @@ def _run_bot(reset_to_usdc=False):
             logging.warning("BTC Macro: Insufficient data, defaulting to BULL")
 
         # 2. ETH/BTC Rotation Signal
-        rotation_signal = compute_eth_btc_ratio(data_provider)
+        rotation_signal = regime_detector.compute_eth_btc_ratio(data_provider)
         if rotation_signal is None:
             logging.warning("ETH/BTC ratio unavailable, falling back to BTC-only regime")
             rotation_signal = "NEUTRAL_RATIO"
@@ -996,15 +1034,15 @@ def _run_bot(reset_to_usdc=False):
         # 2.5. Bitcoin Dominance (optional)
         btc_dominance = None
         if ENABLE_BTC_DOMINANCE:
-            btc_dominance = get_btc_dominance()
+            btc_dominance = regime_detector.get_btc_dominance()
             if btc_dominance is None:
                 logging.info("BTC dominance unavailable, continuing without it")
 
         # 3. Resolve Composite Regime
-        full_regime = resolve_regime(btc_macro, rotation_signal, btc_dominance)
+        full_regime = regime_detector.resolve_regime(btc_macro, rotation_signal, btc_dominance)
 
         # 4. Map to legacy BULL/BEAR for backward compatibility
-        market_regime = regime_to_legacy(full_regime)
+        market_regime = regime_detector.regime_to_legacy(full_regime)
 
         # Enhanced regime logging with reasoning
         regime_explanation = {
@@ -1029,7 +1067,7 @@ def _run_bot(reset_to_usdc=False):
         # Single-asset regime (legacy behavior)
         trend_product = get_data_product_id(TREND_ASSET)
         trend_df = data_provider.get_market_data(trend_product, LONG_WINDOW)
-        trend_s, trend_l = analyze_trend(trend_df)
+        trend_s, trend_l = technical_analysis.analyze_trend(trend_df)
 
         if trend_s and trend_l:
             if trend_s > trend_l * 1.002:
@@ -1047,7 +1085,7 @@ def _run_bot(reset_to_usdc=False):
     confirmed_regime = apply_regime_hysteresis(full_regime)
     if confirmed_regime != full_regime:
         full_regime = confirmed_regime
-        market_regime = regime_to_legacy(full_regime)
+        market_regime = regime_detector.regime_to_legacy(full_regime)
 
     # Dynamic strategy switching based on regime
     global strategy

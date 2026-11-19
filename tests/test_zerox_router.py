@@ -23,6 +23,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(REPO)
 
 import executors.ethereum_executor as eth_mod
+import executors.onchain.common as onchain_common
 from executors.ethereum_executor import (
     ALLOWANCE_HOLDER_ADDRESS,
     SETTLER_REGISTRY_ADDRESS,
@@ -203,7 +204,7 @@ def _receipt(status=1):
 @pytest.fixture
 def executor(monkeypatch, tmp_path, nonces, chain, signed):
     monkeypatch.delenv("ONCHAIN_KILL_SWITCH", raising=False)
-    monkeypatch.setattr(eth_mod, "ONCHAIN_KILL_SWITCH_FILE", str(tmp_path / "kill"))
+    monkeypatch.setattr(onchain_common, "ONCHAIN_KILL_SWITCH_FILE", str(tmp_path / "kill"))
     ex = EthereumExecutor("http://read.invalid", TEST_KEY, "live", trusted_rpc_url="http://trusted.invalid")
     ex.onchain_router = "zerox"
     ex.zerox = FakeZeroEx()
@@ -708,7 +709,7 @@ class TestPostTradeCheck:
             result = _buy(executor)
 
         assert result["confirmed"] is True
-        assert os.path.exists(eth_mod.ONCHAIN_KILL_SWITCH_FILE)
+        assert os.path.exists(onchain_common.ONCHAIN_KILL_SWITCH_FILE)
         assert any(r.levelno == logging.CRITICAL for r in caplog.records)
         assert executor.trusted_w3.eth.send_raw_transaction.call_count == 1
         blocks = [c.kwargs["block_identifier"] for c in chain.tokens[WETH.lower()].functions.balanceOf.return_value.call.call_args_list]
@@ -719,14 +720,14 @@ class TestPostTradeCheck:
         _buy_quotes(executor)
 
         assert _buy(executor)["success"] is True
-        assert not os.path.exists(eth_mod.ONCHAIN_KILL_SWITCH_FILE)
+        assert not os.path.exists(onchain_common.ONCHAIN_KILL_SWITCH_FILE)
 
     def test_sell_shortfall_engages_kill_switch(self, executor, chain):
         chain.token(USDC, balances={BLOCK_NUMBER: 0, SWAP_BLOCK: floor(SELL_OUT) - 1})
         _sell_quotes(executor)
 
         assert _sell(executor)["confirmed"] is True
-        assert os.path.exists(eth_mod.ONCHAIN_KILL_SWITCH_FILE)
+        assert os.path.exists(onchain_common.ONCHAIN_KILL_SWITCH_FILE)
 
     def test_next_swap_refused_after_shortfall(self, executor, chain):
         chain.token(WETH, balances={BLOCK_NUMBER: 0, SWAP_BLOCK: 1})
@@ -752,12 +753,12 @@ class TestPostTradeCheck:
 
         assert result["confirmed"] is True
         assert any(r.levelno == logging.CRITICAL and "unverified" in r.getMessage() for r in caplog.records)
-        assert not os.path.exists(eth_mod.ONCHAIN_KILL_SWITCH_FILE)
+        assert not os.path.exists(onchain_common.ONCHAIN_KILL_SWITCH_FILE)
 
     def test_unwritable_kill_switch_file_never_raises(self, monkeypatch, tmp_path, caplog):
         blocker = tmp_path / "not_a_dir"
         blocker.write_text("")
-        monkeypatch.setattr(eth_mod, "ONCHAIN_KILL_SWITCH_FILE", str(blocker / "kill"))
+        monkeypatch.setattr(onchain_common, "ONCHAIN_KILL_SWITCH_FILE", str(blocker / "kill"))
 
         with caplog.at_level(logging.CRITICAL):
             eth_mod.engage_onchain_kill_switch("test")
@@ -766,7 +767,7 @@ class TestPostTradeCheck:
 
     def test_kill_switch_file_without_directory(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(eth_mod, "ONCHAIN_KILL_SWITCH_FILE", "kill")
+        monkeypatch.setattr(onchain_common, "ONCHAIN_KILL_SWITCH_FILE", "kill")
 
         eth_mod.engage_onchain_kill_switch("test")
 

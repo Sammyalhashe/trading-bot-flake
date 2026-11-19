@@ -9,7 +9,7 @@ Home Manager module. It runs live, paper (simulated ledger) and backtest modes f
 |---|---|
 | `trading_bot.py` | Main loop (`trading-bot`): regime detection, entries, exits, notifications |
 | `strategies/` | Entry/exit decision logic, one file per strategy; `__init__.py` is the registry |
-| `executors/` | Venues behind one interface (`base.py`): Coinbase, Coinbase futures, paper ledger, Base (`ethereum_executor.py`: Aerodrome, 0x, KyberSwap, CoW) |
+| `executors/` | Venues behind one interface (`base.py`): Coinbase, Coinbase futures, paper ledger, Base (`ethereum_executor.py` core; one route per file in `executors/onchain/`: Aerodrome, 0x, KyberSwap, CoW) |
 | `core/` | Shared machinery: risk manager, regime detection, indicators, state, trade log, control channel, Telegram |
 | `config/` | Settings read from the environment (`trading_config.py`, `executor_config.py`, `network_config.py`) |
 | `backtesting/` | Backtest engine (`backtest.py`), data download, and dated research experiments |
@@ -35,9 +35,9 @@ Top-level entry points and the commands they become:
 |---|---|
 | New strategy | Add `strategies/<name>.py` (copy a sibling) and one line in `STRATEGIES` in `strategies/__init__.py` |
 | Position sizing, drawdown pause | `core/risk_manager.py` |
-| Stops, take-profits, exit flow | `run_executor_strategy` in `trading_bot.py` |
+| Stops, take-profits, exit flow | `_manage_exits` / `_execute_exit` in `trading_bot.py` (`run_executor_strategy` is the per-cycle outline) |
 | Market regime | `core/regime_detection.py` |
-| New venue or DEX route | `executors/` (Base routes: `ethereum_executor.py`, safety settings in its docstring) |
+| New venue or DEX route | `executors/`; a Base route is a mixin in `executors/onchain/` (safety settings in `ethereum_executor.py`'s docstring) |
 | A setting | Read it in `config/`, then expose it via `settings` in `nix/hm-module.nix` |
 | Services, timers, paper variants | `nix/hm-module.nix`; per-host values live in the nixosConfig repo (`homeManagerModules/coinbase-trader.nix`) |
 
